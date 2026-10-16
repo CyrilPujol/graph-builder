@@ -1,0 +1,160 @@
+<?xml version='1.0' encoding='utf-8'?>
+<graphml xmlns="http://graphml.graphdrawing.org/xmlns" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://graphml.graphdrawing.org/xmlns http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd">
+  <key id="d4" for="edge" attr.name="curve_offsets" attr.type="string" />
+  <key id="d3" for="edge" attr.name="col" attr.type="long" />
+  <key id="d2" for="node" attr.name="position_y" attr.type="double" />
+  <key id="d1" for="node" attr.name="position_x" attr.type="double" />
+  <key id="d0" for="node" attr.name="col" attr.type="long" />
+  <graph edgedefault="directed">
+    <node id="0">
+      <data key="d0">1</data>
+      <data key="d1">712.7826522694415</data>
+      <data key="d2">387.76970190193697</data>
+    </node>
+    <node id="1">
+      <data key="d0">0</data>
+      <data key="d1">784.8393430000006</data>
+      <data key="d2">510.96933899999993</data>
+    </node>
+    <node id="2">
+      <data key="d0">0</data>
+      <data key="d1">712.7826522694415</data>
+      <data key="d2">630.1689760980628</data>
+    </node>
+    <node id="3">
+      <data key="d0">0</data>
+      <data key="d1">570.3039337305593</data>
+      <data key="d2">583.8748341507555</data>
+    </node>
+    <node id="4">
+      <data key="d0">0</data>
+      <data key="d1">570.3039337305593</data>
+      <data key="d2">434.0638438492444</data>
+    </node>
+    <node id="5">
+      <data key="d0">0</data>
+      <data key="d1">492.98000677847847</data>
+      <data key="d2">640.0539555138221</data>
+    </node>
+    <node id="6">
+      <data key="d0">3</data>
+      <data key="d1">492.98000677847847</data>
+      <data key="d2">377.88472248617774</data>
+    </node>
+    <node id="7">
+      <data key="d0">0</data>
+      <data key="d1">742.3177642215222</data>
+      <data key="d2">296.86997407838993</data>
+    </node>
+    <node id="8">
+      <data key="d0">0</data>
+      <data key="d1">896.4169730000007</data>
+      <data key="d2">508.96933899999993</data>
+    </node>
+    <node id="9">
+      <data key="d0">0</data>
+      <data key="d1">742.3177642215222</data>
+      <data key="d2">721.06870392161</data>
+    </node>
+    <edge source="0" target="3">
+      <data key="d3">1</data>
+    </edge>
+    <edge source="0" target="2">
+      <data key="d3">1</data>
+    </edge>
+    <edge source="0" target="7">
+      <data key="d3">0</data>
+    </edge>
+    <edge source="1" target="4">
+      <data key="d3">0</data>
+    </edge>
+    <edge source="1" target="3">
+      <data key="d3">1</data>
+    </edge>
+    <edge source="1" target="8">
+      <data key="d3">0</data>
+    </edge>
+    <edge source="2" target="0">
+      <data key="d3">1</data>
+    </edge>
+    <edge source="2" target="4">
+      <data key="d3">0</data>
+    </edge>
+    <edge source="2" target="9">
+      <data key="d3">0</data>
+    </edge>
+    <edge source="3" target="0">
+      <data key="d3">1</data>
+    </edge>
+    <edge source="3" target="1">
+      <data key="d3">1</data>
+    </edge>
+    <edge source="3" target="5">
+      <data key="d3">0</data>
+    </edge>
+    <edge source="4" target="2">
+      <data key="d3">0</data>
+    </edge>
+    <edge source="4" target="1">
+      <data key="d3">0</data>
+    </edge>
+    <edge source="4" target="6">
+      <data key="d3">0</data>
+    </edge>
+    <edge source="5" target="3">
+      <data key="d3">0</data>
+    </edge>
+    <edge source="5" target="6">
+      <data key="d3">0</data>
+      <data key="d4">[[-40.85388136394943, 6.049999999999898]]</data>
+    </edge>
+    <edge source="5" target="9">
+      <data key="d3">0</data>
+      <data key="d4">[[-11.58500000000015, 38.86112729918011]]</data>
+    </edge>
+    <edge source="6" target="5">
+      <data key="d3">0</data>
+      <data key="d4">[[-40.85388136394943, 6.049999999999898]]</data>
+    </edge>
+    <edge source="6" target="7">
+      <data key="d3">0</data>
+      <data key="d4">[[-11.584999999999923, -43.70112729918014]]</data>
+    </edge>
+    <edge source="6" target="4">
+      <data key="d3">0</data>
+    </edge>
+    <edge source="7" target="6">
+      <data key="d3">0</data>
+      <data key="d4">[[-11.584999999999923, -43.70112729918014]]</data>
+    </edge>
+    <edge source="7" target="8">
+      <data key="d3">0</data>
+      <data key="d4">[[38.06194068197465, -21.40880039423945]]</data>
+    </edge>
+    <edge source="7" target="0">
+      <data key="d3">0</data>
+    </edge>
+    <edge source="8" target="7">
+      <data key="d3">0</data>
+      <data key="d4">[[38.06194068197465, -21.40880039423945]]</data>
+    </edge>
+    <edge source="8" target="9">
+      <data key="d3">0</data>
+      <data key="d4">[[33.22194068197473, 21.408800394239393]]</data>
+    </edge>
+    <edge source="8" target="1">
+      <data key="d3">0</data>
+    </edge>
+    <edge source="9" target="8">
+      <data key="d3">0</data>
+      <data key="d4">[[33.22194068197473, 21.408800394239393]]</data>
+    </edge>
+    <edge source="9" target="5">
+      <data key="d3">0</data>
+      <data key="d4">[[-11.58500000000015, 38.86112729918011]]</data>
+    </edge>
+    <edge source="9" target="2">
+      <data key="d3">0</data>
+    </edge>
+  </graph>
+</graphml>

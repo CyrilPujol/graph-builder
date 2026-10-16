@@ -1,0 +1,19 @@
+\pgfdeclarelayer{edgelayer}
+\pgfdeclarelayer{nodelayer}
+\pgfsetlayers{background,edgelayer,nodelayer,main}
+
+\tikzstyle{vertex_0}=[fill=white, draw=black, shape=circle, scale=.5pt]
+\tikzstyle{edge_0}=[-, line width=1.pt, fill=none, draw=black]
+\tikzstyle{edge_1}=[-, line width=1.pt, fill=none, draw=red]
+
+\begin{tikzpicture}[scale=1.0]
+	\begin{pgfonlayer}{nodelayer}
+		\node [style=vertex_0] (0) at (5.75, 4.5) {};
+		\node [style=vertex_0] (1) at (6., 4.5) {};
+		\node [style=vertex_0] (2) at (7.25, 4.5) {};
+			\end{pgfonlayer}
+	\begin{pgfonlayer}{edgelayer}
+		\draw [style=edge_0] (0) to (1);
+		\draw [style=edge_1] (1) to (2);
+	\end{pgfonlayer}
+\end{tikzpicture}
