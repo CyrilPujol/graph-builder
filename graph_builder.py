@@ -1,213 +1,215 @@
-"""Example graph-editor application with a few graph transformations."""
+"""Example graph-editor application with useful graph transformations."""
 
 from __future__ import annotations
 
 import argparse
-
-import networkx as nx
-import numpy as np
+import copy
+from math import cos, pi, sin
+import random
 
 from graph_builder_lib import (
+    Action,
     ContextAction,
-    GraphAction,
-    VertexAction,
-    dist,
+    _edge_curve_points,
+    _set_edge_curve_points,
     main,
     unused_label,
 )
 
-def twin(graph,vertex):
-    #make a twin of the selected vertex
-    if vertex is None:
+
+def _selected_nodes(selection):
+    """Return vertices selected directly or through selected edges."""
+    nodes = set(selection.nodes)
+    for edge in selection.edges:
+        nodes.update((edge.source, edge.target))
+    return nodes
+
+
+def twin(graph, vertices, return_new_vertices=False):
+    """Add one twin for every selected vertex, using the original adjacency."""
+    originals = [vertex for vertex in graph.nodes if vertex in vertices]
+    if not originals:
+        return (graph, set()) if return_new_vertices else graph
+    directed = graph.graph.get('graph_type') != 'graph'
+    original_edges = [
+        (source, target, copy.deepcopy(attributes))
+        for source, target, attributes in graph.edges(data=True)
+    ]
+    new_vertices = set()
+    for index, vertex in enumerate(originals, start=1):
+        new_vertex = unused_label(graph)
+        new_vertices.add(new_vertex)
+        x, y = graph.nodes[vertex]['position']
+        graph.add_node(new_vertex, position=(x + 20 * index, y + 20 * index), col=graph.nodes[vertex]['col'])
+        for source, target, attributes in original_edges:
+            if source == vertex:
+                graph.add_edge(new_vertex, target, **copy.deepcopy(attributes))
+            if directed and target == vertex:
+                graph.add_edge(source, new_vertex, **copy.deepcopy(attributes))
+    return (graph, new_vertices) if return_new_vertices else graph
+
+
+def contract(graph, vertices):
+    """Contract selected vertices (or selected-edge endpoints) into one vertex."""
+    vertices = set(vertices) & set(graph.nodes)
+    if len(vertices) < 2:
         return graph
-    new_node = unused_label(graph)
-    graph.add_node(new_node)
-    graph.nodes[new_node]['position'] = (graph.nodes[vertex]['position'][0]+20,graph.nodes[vertex]['position'][1]+20)
-    graph.nodes[new_node]['col'] = graph.nodes[vertex]['col']
-    for u,v in graph.edges(vertex):
-        attrs = graph.edges[u,v]
-        graph.add_edge(new_node,v,**attrs)
-        if graph.graph['graph_type'] == 'graph':
-            graph.add_edge(v,new_node,**attrs)
-    return graph
-
-def merge(graph,vertex,box):
-    ### merge all vertices that touch the selected vertex (distance smaller than vertex_radius).
-    if vertex is None:
-        return graph
-    pos_v = graph.nodes[vertex]['position']
-    to_merge = []
-    for u in graph.nodes:
-        if u != vertex:
-            pos_u = graph.nodes[u]['position']
-            if dist(pos_v,pos_u) < box.vertex_radius:
-                to_merge.append(u)
-    for u in to_merge:
-        for _,v in graph.edges(u):
-            if v != vertex:
-                attrs = graph.edges[u,v]
-                graph.add_edge(vertex,v,**attrs)
-                if graph.graph['graph_type'] == 'graph':
-                    graph.add_edge(v,vertex,**attrs)
-        graph.remove_node(u)
-    return graph
-
-def full_join(graph):
-    ### create the full join of all connected components of the graph
-    components = list(nx.weakly_connected_components(graph))
-    for i in range(len(components)):
-        for j in range(i+1,len(components)):
-            for u in components[i]:
-                for v in components[j]:
-                    attrs = {'col' : 0}
-                    graph.add_edge(u,v,**attrs)
-                    if graph.graph['graph_type'] == 'graph':
-                        graph.add_edge(v,u,**attrs)
-
-def snap_grid(graph):
-    k = 30
-    for u in graph.nodes:
-        (x,y) = graph.nodes[u]['position']
-        graph.nodes[u]['position'] = int(x/k+.5)*k,int(y/k+.5)*k
-    return graph
-
-def tensor_product(graph):
-    if nx.number_weakly_connected_components(graph) >= 2:
-        VG, VH = list(nx.weakly_connected_components(graph))[:2]
-        G, H = graph.subgraph(VG), graph.subgraph(VH)
-        K = nx.tensor_product(G, H)
-        for (u, v) in K.nodes:
-            pos = (G.nodes[u]['position'][0], H.nodes[v]['position'][1])
-            K.nodes[(u, v)]['position'] = pos
-            for key in G.nodes[u].keys():
-                if key != 'position':
-                    K.nodes[(u, v)][key] = G.nodes[u][key]
-                    #print(f"K.nodes[(u, v)][key] : {K.nodes[(u, v)][key]}")
-        for e in K.edges():
-            ((u,v),(u_,v_)) = e
-            for key,value in G.edges[u,u_].items():
-                K.edges[e][key] = value
-        graph = nx.disjoint_union_all([G, H, K])
-        graph = nx.convert_node_labels_to_integers(graph)
-        graph = nx.relabel_nodes(graph, lambda x: str(x))
-        return graph
-    else:
-        print("Not the right number of CC")
-        return graph
-
-def switch(graph,vertex):
-    if vertex is None:
-        return graph
-    
-    for edge in graph.edges(vertex):
-        (u,v) = edge #normally u == vertex
-        graph.edges[edge]['col'] = (graph.edges[edge]['col']+1)%graph.graph['num_edge_colors']
-        graph.edges[v,u]['col'] = (graph.edges[v,u]['col']+1)%graph.graph['num_edge_colors'] # must switch also the reverse arc
-    return graph
-
-
-def degree(graph):
-    degrees = dict(nx.degree(graph))
-    l_deg = [ x//2 for (k,x) in degrees.items()]
-    print( f"min deg, avg deg, max deg = ,{min(l_deg), np.mean(l_deg), max(l_deg)}")
-    print( f"n ={len(graph.nodes)} e ={len(graph.edges)}")
-    return graph
-
-def midpos(pos1,pos2):
-    x,y = pos1
-    x_,y_ = pos2
-    return ((x+x_)/2,(y+y_)/2 )
-
-def subdivide(graph,vertex):
-    # If vertex is not None, subdivide all edges incident to vertex
-    # Otherwise subdivide all edges
-    
-    new_graph = graph.copy()
-    edges_to_add = []
-    edges_to_remove = []
-    new_nodes = {}
-    
-    for u, v, attrs in graph.edges(data=True):
-        if vertex is not None and (u != vertex and v != vertex):
-            continue
-        if (u,v) in edges_to_remove :
-            continue
-        new_node = unused_label(new_graph)
-        new_graph.add_node(new_node)
-        new_nodes[new_node] = (u, v)
-        if graph.graph["graph_type"] == "graph":
-            edges_to_remove+=[(u, v),(v,u)]
-        else:
-            edges_to_remove.append((u, v))
-        
-        # Save edges to add later
-        edges_to_add.append((u, new_node, attrs))
-        edges_to_add.append((new_node, v, attrs))
-    
-    # Remove old edges
-    new_graph.remove_edges_from(edges_to_remove)
-    
-    # Add new nodes and edges
-    for new_node, (u, v) in new_nodes.items():
-        new_graph.nodes[new_node]['position'] = midpos(new_graph.nodes[u]['position'],new_graph.nodes[v]['position'])
-        new_graph.nodes[new_node]['col'] = new_graph.nodes[u]['col']
-    for u, v, attrs in edges_to_add:
-        new_graph.add_edge(u, v, **attrs)
-    
+    new_vertex = unused_label(graph)
+    positions = [graph.nodes[vertex]['position'] for vertex in vertices]
+    position = (sum(x for x, _ in positions) / len(positions), sum(y for _, y in positions) / len(positions))
+    new_graph = graph.__class__()
+    new_graph.graph.update(copy.deepcopy(graph.graph))
+    for vertex, attributes in graph.nodes(data=True):
+        if vertex not in vertices:
+            new_graph.add_node(vertex, **copy.deepcopy(attributes))
+    representative = next(vertex for vertex in graph.nodes if vertex in vertices)
+    new_graph.add_node(new_vertex, position=position, col=graph.nodes[representative].get('col', 0))
+    for source, target, attributes in graph.edges(data=True):
+        source = new_vertex if source in vertices else source
+        target = new_vertex if target in vertices else target
+        if source != target:
+            new_graph.add_edge(source, target, **copy.deepcopy(attributes))
     return new_graph
 
-def rotate(graph,vertex):
-    # rotate the graph around the selected vertex by 10 degrees
-    if vertex is None:
-        return graph
-    # Implementation for rotating the graph around the selected vertex by 10 degrees
-    angle = np.radians(10)
-    cos_angle = np.cos(angle)
-    sin_angle = np.sin(angle)
-    pos_v = graph.nodes[vertex]['position']
-    for u in graph.nodes:       
-        if u != vertex:
-            pos_u = graph.nodes[u]['position']
-            # Translate to origin
-            translated_x = pos_u[0] - pos_v[0]
-            translated_y = pos_u[1] - pos_v[1]
-            # Rotate
-            rotated_x = translated_x * cos_angle - translated_y * sin_angle
-            rotated_y = translated_x * sin_angle + translated_y * cos_angle
-            # Translate back
-            new_pos = (rotated_x + pos_v[0], rotated_y + pos_v[1])
-            graph.nodes[u]['position'] = new_pos
+
+def complement(graph, vertices):
+    """Complement the graph induced by ``vertices``, or the whole graph."""
+    vertices = set(vertices) & set(graph.nodes)
+    vertices = list(vertices or graph.nodes)
+    if graph.graph.get('graph_type') == 'graph':
+        for index, source in enumerate(vertices):
+            for target in vertices[index + 1:]:
+                if graph.has_edge(source, target) or graph.has_edge(target, source):
+                    graph.remove_edges_from(((source, target), (target, source)))
+                else:
+                    graph.add_edge(source, target, col=0)
+                    graph.add_edge(target, source, col=0)
+    else:
+        for source in vertices:
+            for target in vertices:
+                if source != target:
+                    if graph.has_edge(source, target):
+                        graph.remove_edge(source, target)
+                    else:
+                        graph.add_edge(source, target, col=0)
     return graph
+
+
+def randomize(graph, vertices, random_source=random.random):
+    """Replace induced edges by independent probability-one-half edges."""
+    vertices = list(set(vertices) & set(graph.nodes)) or list(graph.nodes)
+    if graph.graph.get('graph_type') == 'graph':
+        for index, source in enumerate(vertices):
+            for target in vertices[index + 1:]:
+                graph.remove_edges_from(((source, target), (target, source)))
+                if random_source() < 0.5:
+                    graph.add_edge(source, target, col=0)
+                    graph.add_edge(target, source, col=0)
+    else:
+        for source in vertices:
+            for target in vertices:
+                if source != target:
+                    graph.remove_edge(source, target) if graph.has_edge(source, target) else None
+                    if random_source() < 0.5:
+                        graph.add_edge(source, target, col=0)
+    return graph
+
+
+def switch(graph, vertices):
+    """Cycle the colour of every edge incident to a selected vertex."""
+    vertices = set(vertices) & set(graph.nodes)
+    directed = graph.graph.get('graph_type') != 'graph'
+    visited = set()
+    for source, target in list(graph.edges):
+        selected_endpoints = (source in vertices) + (target in vertices)
+        if selected_endpoints != 1:
+            continue
+        logical_edge = (source, target) if directed else frozenset((source, target))
+        if logical_edge in visited:
+            continue
+        visited.add(logical_edge)
+        color = (graph.edges[source, target].get('col', 0) + 1) % graph.graph['num_edge_colors']
+        graph.edges[source, target]['col'] = color
+        if not directed and graph.has_edge(target, source):
+            graph.edges[target, source]['col'] = color
+    return graph
+
+
+def degree_summary(graph):
+    if graph.graph.get('graph_type') == 'graph':
+        degrees = [value / 2 for _, value in graph.degree()]
+        edge_count = graph.number_of_edges() / 2
+    else:
+        degrees = [value for _, value in graph.degree()]
+        edge_count = graph.number_of_edges()
+    if not degrees:
+        return 'Empty graph'
+    return (
+        f'Vertices: {graph.number_of_nodes()}   Edges: {edge_count:.0f}\n'
+        f'Degree — min: {min(degrees):.0f}   avg: {sum(degrees) / len(degrees):.3f}   max: {max(degrees):.0f}'
+    )
+
+
+def rotate(graph, vertices, degrees):
+    """Rotate all other vertices around the one selected pivot."""
+    if len(vertices) != 1:
+        return graph
+    pivot = next(iter(vertices))
+    angle = degrees * pi / 180
+    pivot_x, pivot_y = graph.nodes[pivot]['position']
+
+    directed = graph.graph.get('graph_type') != 'graph'
+    seen_edges = set()
+    curve_points = {}
+    for source, target in graph.edges:
+        edge_key = (source, target) if directed else frozenset((source, target))
+        if edge_key in seen_edges:
+            continue
+        seen_edges.add(edge_key)
+        curve_points[(source, target)] = _edge_curve_points(graph, source, target)
+
+    def rotate_point(point):
+        x, y = point[0] - pivot_x, point[1] - pivot_y
+        return (
+            x * cos(angle) - y * sin(angle) + pivot_x,
+            x * sin(angle) + y * cos(angle) + pivot_y,
+        )
+
+    for vertex in graph.nodes:
+        if vertex == pivot:
+            continue
+        graph.nodes[vertex]['position'] = rotate_point(graph.nodes[vertex]['position'])
+    for (source, target), points in curve_points.items():
+        if points:
+            _set_edge_curve_points(graph, source, target, [rotate_point(point) for point in points])
+    return graph
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Interactive graph editor')
-    parser.add_argument(
-        '--graph',
-        metavar='FILE',
-        help='GraphML file to open and save (default: graph.graphml in the current directory)',
-    )
+    parser.add_argument('--graph', metavar='FILE', help='GraphML file to open and save')
     args = parser.parse_args()
 
+    def selected(context):
+        return _selected_nodes(context.selection)
+
+    def show_degree(context):
+        context.box.write(degree_summary(context.graph), 5, (.8, .2))
+
+    def make_twins(context):
+        graph, new_vertices = twin(context.graph, selected(context), return_new_vertices=True)
+        context.selection.clear()
+        context.selection.nodes.update(new_vertices)
+        return graph
+
     actions = [
-        GraphAction(degree, 'd'),
-        VertexAction(twin, 'w'),
-        VertexAction(switch, 's'),
-        ContextAction(
-            lambda context: merge(
-                context.graph, context.selection.single_node(), context.box
-            ),
-            'm',
-            available=lambda context: context.selection.single_node() is not None,
-            name='merge',
-        ),
-        GraphAction(full_join, 'j'),
-        GraphAction(tensor_product, 'p'),
-        VertexAction(rotate, 'r'),
+        ContextAction(show_degree, 'd', name='Degree'),
+        ContextAction(make_twins, 'w', available=lambda context: bool(selected(context)), name='Twin'),
+        ContextAction(lambda context: switch(context.graph, selected(context)), 's', available=lambda context: bool(selected(context)), name='Switch'),
+        ContextAction(lambda context: contract(context.graph, selected(context)), 'o', available=lambda context: len(selected(context)) >= 2, name='Contract', group='basic'),
+        ContextAction(lambda context: complement(context.graph, selected(context)), None, name='Complement', group='basic'),
+        ContextAction(lambda context: randomize(context.graph, context.selection.nodes), None, name='Randomize'),
+        Action('custom:rotate_minus', 'Rotate', None, lambda context: rotate(context.graph, selected(context), -10), lambda context: len(selected(context)) == 1, group='basic', pair_label='Rotate', pair_id='rotate'),
+        Action('custom:rotate_plus', 'Rotate', None, lambda context: rotate(context.graph, selected(context), 10), lambda context: len(selected(context)) == 1, group='basic', pair_label='Rotate', pair_id='rotate'),
     ]
-    main(
-        actions=actions,
-        graph_file=args.graph,
-        graph_type='graph',
-        num_edge_colors=2,
-        num_vertex_colors=4,
-    )
+    main(actions=actions, graph_file=args.graph, graph_type='graph', num_edge_colors=2, num_vertex_colors=4)

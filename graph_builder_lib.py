@@ -9,10 +9,71 @@ from networkx.readwrite import json_graph
 import copy
 from math import atan2, ceil, cos, pi, sin
 from pathlib import Path
+import platform
+import subprocess
 from typing import Any, Callable
 
 DEFAULT_GRAPH_FILE = 'graph.graphml'
 RADIAL_GRID_OFFSET = -pi / 2
+
+# File persistence and native dialogs
+
+def choose_graph_file(default_path, save=False):
+    """Use the native file dialog to choose a GraphML file, when available."""
+    default_path = Path(default_path)
+    try:
+        if platform.system() == 'Darwin':
+            if save:
+                name = default_path.name.replace('\\', '\\\\').replace('"', '\\"')
+                script = (
+                    'POSIX path of (choose file name with prompt "Save graph as:" '
+                    f'default name "{name}")'
+                )
+            else:
+                script = 'POSIX path of (choose file with prompt "Load GraphML graph:")'
+            result = subprocess.run(
+                ['/usr/bin/osascript', '-e', script],
+                capture_output=True, text=True, check=False,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return None
+            selected = Path(result.stdout.strip())
+        else:
+            from tkinter import Tk, filedialog
+
+            root = Tk()
+            try:
+                root.withdraw()
+                root.attributes('-topmost', True)
+                if save:
+                    selected = filedialog.asksaveasfilename(
+                        title='Save graph as', initialdir=str(default_path.parent),
+                        initialfile=default_path.name, defaultextension='.graphml',
+                        filetypes=[('GraphML files', '*.graphml'), ('All files', '*.*')],
+                    )
+                else:
+                    selected = filedialog.askopenfilename(
+                        title='Load GraphML graph', initialdir=str(default_path.parent),
+                        filetypes=[('GraphML files', '*.graphml'), ('All files', '*.*')],
+                    )
+            finally:
+                root.destroy()
+            if not selected:
+                return None
+            selected = Path(selected)
+    except Exception:
+        return default_path if save else None
+    return selected.with_suffix('.graphml') if save and not selected.suffix else selected
+
+
+def write_graph_file(graph, path):
+    """Persist an editor graph as GraphML, creating its parent directory."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nx.write_graphml(convert_position(graph), path)
+    return path
+
+# Geometry, grids, and colour helpers
 
 def dist(pos1, pos2):
     """
@@ -108,6 +169,8 @@ def colormap_1(k):
         phi = (np.sqrt(5)-1)/2
         eps = 0.015* 5*(k//5)
         return tuple(round(i * 255) for i in colorsys.hsv_to_rgb(phi*(k-1),1,1-eps))
+
+# Graph editing primitives and curve geometry
 
 def flip_edge(graph, v1, v2,edge_color=0):
     """Add or remove an edge (handles undirected as two arcs)."""
@@ -304,6 +367,8 @@ def _edge_screen_samples(graph, box, source, target):
     return _interpolating_curve_samples(start, end, controls)
 
 
+# Selection, clipboard, and action abstractions
+
 class EdgeRef:
     """A logical edge, with direction included only for directed graphs."""
     def __init__(self, source, target, directed):
@@ -471,12 +536,17 @@ class Action:
     library: bool = False
     group: str = 'custom'
     checked: Callable[[EditorContext], bool] | None = None
+    pair_label: str | Callable[[EditorContext], str] | None = None
+    pair_id: str | None = None
 
     def is_available(self, context):
         return self.available(context)
 
     def display_name(self, context):
         return self.name(context) if callable(self.name) else self.name
+
+    def display_pair_label(self, context):
+        return self.pair_label(context) if callable(self.pair_label) else self.pair_label
 
 
 def execute_action(action, context):
@@ -569,7 +639,7 @@ def ContextAction(function, shortcut, available=lambda context: True, name=None,
             context.replace_graph(result)
 
     return Action(
-        f'custom:{shortcut.lower()}',
+        f"custom:{shortcut.lower() if shortcut else (name or function.__name__)}",
         name or function.__name__,
         shortcut,
         invoke,
@@ -586,8 +656,9 @@ def _shortcut_for_key(event, modifiers):
     primary_modifier = pygame.KMOD_CTRL | pygame.KMOD_GUI
     if modifiers & primary_modifier and event.key == pygame.K_z:
         shortcut = 'shift+ctrl+z' if modifiers & pygame.KMOD_SHIFT else 'ctrl+z'
-    elif modifiers & primary_modifier and event.key in (pygame.K_c, pygame.K_v, pygame.K_s):
-        shortcut = f'ctrl+{chr(event.key)}'
+    elif modifiers & primary_modifier and event.key in (pygame.K_c, pygame.K_o, pygame.K_s, pygame.K_v):
+        prefix = 'shift+ctrl' if modifiers & pygame.KMOD_SHIFT else 'ctrl'
+        shortcut = f'{prefix}+{chr(event.key)}'
     elif event.key in (pygame.K_DELETE, pygame.K_BACKSPACE):
         shortcut = 'del'
     elif event.key == pygame.K_ESCAPE:
@@ -600,6 +671,8 @@ def _shortcut_for_key(event, modifiers):
         return None
     return _normalize_shortcut(shortcut)
 
+
+# Pointer interaction state
 
 class InteractionController:
     """Own pointer hit-testing, selection, and in-progress mouse gestures."""
@@ -940,6 +1013,8 @@ class InteractionController:
             return selected
         return self.hit_node(graph, position, min_distance=20)
 
+# Graph serialization and drawing helpers
+
 def unused_label(graph):
     """Return an unused numeric string label for a new node."""
     i = 0
@@ -1041,10 +1116,9 @@ def draw_arrow(screen, p1, p2,size=.5,arrow_tip=True,vertex_radius=15,color=(0,0
 def print_rules(actions = ()):
     """Print editor usage rules to stdout."""
     rules = """Left-click empty space to add a vertex
-Left-click to select
 Left-click a vertex to select/move it
 Right-click a vertex and drag to add/remove edges
-Right-click and release on the same vertex to delete it
+Right-click on a vertex to delete it
 Space-bar to erase everything 
 [C] to change color
 [Ctrl]+[C] to copy graph
@@ -1060,6 +1134,8 @@ Automatically saved when closed"""
     
     #print(rules)
     return rules
+
+# Editor canvas and toolbar
 
 class BOX:
     def __init__(self, screen):
@@ -1278,12 +1354,9 @@ class BOX:
                     pygame.draw.circle(self.screen, (0, 180, 90), p, self.vertex_radius + 4, 3)
                 pygame.draw.circle(self.screen, c, p, self.vertex_radius)
 
-                # render the vertex name
-                text = self.font.render(v, True, (255, 255, 255))
-                text_rect = text.get_rect(center=p)
-
-                # blit the text on the screen
-                self.screen.blit(text, text_rect)
+                if graph.graph.get('show_vertex_labels', True):
+                    text = self.font.render(str(v), True, (255, 255, 255))
+                    self.screen.blit(text, text.get_rect(center=p))
 
         if selection is not None:
             for edge in selection.edges:
@@ -1308,21 +1381,29 @@ class BOX:
 
     def _toolbar_items(self, actions, context):
         items = []
-        group_order = ['basic', 'custom']
-        group_order.extend(
-            action.group for action in actions if action.group not in group_order
-        )
+        group_order = ['file', 'basic', 'grid', 'graph_properties', 'custom']
+        group_order = [
+            group for group in group_order
+            if any(action.group == group for action in actions)
+        ]
         x_margin = 12
         row_height = 32
         right_margin = self.screen.get_width() - x_margin
         header_x = x_margin
         header_y = 12
 
+        def group_color(group, active=False):
+            """Keep each menu header and its controls in the same colour family."""
+            return (30, 112, 120) if group == 'custom' else (75, 88, 105)
+
         for group in group_order:
             is_expanded = group in self.expanded_toolbar_groups
             title = {
-                'basic': 'Basic functions',
-                'custom': 'Custom functions',
+                'basic': 'Basic',
+                'file': 'File',
+                'grid': 'Grid',
+                'graph_properties': 'Graph properties',
+                'custom': 'Custom',
             }.get(group, group.replace('_', ' ').title())
             prefix = '- ' if is_expanded else '+ '
             header_width = max(
@@ -1333,7 +1414,7 @@ class BOX:
                 header_x = x_margin
                 header_y += row_height + 5
             header = pygame.Rect(header_x, header_y, header_width, row_height)
-            header_color = (30, 85, 91) if group == 'basic' else (57, 70, 85)
+            header_color = group_color(group, is_expanded)
             items.append(('group', group, prefix + title, header_color, header))
             header_x += header_width + 8
 
@@ -1341,22 +1422,49 @@ class BOX:
         for group in group_order:
             if group not in self.expanded_toolbar_groups:
                 continue
-            grouped_actions = [
-                (index, action) for index, action in enumerate(actions)
-                if action.group == group and action.is_available(context)
-            ]
-            def action_order(item):
-                index, action = item
-                shortcut = _normalize_shortcut(action.shortcut or '')
-                special = (
-                    action.id == 'delete'
-                    or 'ctrl' in shortcut.split('+')
-                    or shortcut in ('esc', 'space')
-                )
-                return (not special, index)
-
+            grouped_actions = [action for action in actions if action.group == group]
             x = x_margin
-            for _, action in sorted(grouped_actions, key=action_order):
+            index = 0
+            while index < len(grouped_actions):
+                action = grouped_actions[index]
+                if action.pair_label is not None:
+                    pair_actions = [action]
+                    pair_key = action.pair_id if action.pair_id is not None else action.pair_label
+                    index += 1
+                    while (
+                        index < len(grouped_actions)
+                        and (grouped_actions[index].pair_id if grouped_actions[index].pair_id is not None else grouped_actions[index].pair_label) == pair_key
+                    ):
+                        pair_actions.append(grouped_actions[index])
+                        index += 1
+                    if not any(pair_action.is_available(context) for pair_action in pair_actions):
+                        continue
+                    pair_label = action.display_pair_label(context)
+                    label_width = self.toolbar_font.size(pair_label)[0]
+                    button_width = self.toolbar_font.size('--')[0] + 18
+                    width = label_width + 2 * button_width + 32
+                    if x > x_margin and x + width > right_margin:
+                        x = x_margin
+                        y += row_height + 5
+                    container = pygame.Rect(x, y, width, row_height)
+                    items.append(('pair', None, pair_label, group_color(group), container))
+                    button_x = x + label_width + 16
+                    for pair_action, symbol in zip(pair_actions, ('--', '++')):
+                        button = pygame.Rect(button_x, y + 4, button_width - 4, row_height - 8)
+                        available = pair_action.is_available(context)
+                        items.append((
+                            'action' if available else 'disabled',
+                            pair_action if available else None,
+                            symbol if available else '',
+                            group_color(group, available),
+                            button,
+                        ))
+                        button_x += button_width
+                    x += width + 8
+                    continue
+                index += 1
+                if not action.is_available(context):
+                    continue
                 toggle_prefix = ''
                 if action.checked is not None:
                     toggle_prefix = '[x] ' if action.checked(context) else '[ ] '
@@ -1368,14 +1476,7 @@ class BOX:
                     x = x_margin
                     y += row_height + 5
                 rect = pygame.Rect(x, y, width, row_height)
-                if action.id == 'delete':
-                    color = (177, 58, 48)
-                elif action.checked is not None and action.checked(context):
-                    color = (35, 133, 92)
-                elif action.library:
-                    color = (30, 112, 120)
-                else:
-                    color = (75, 88, 105)
+                color = group_color(group, action.checked is not None and action.checked(context))
                 items.append(('action', action, label, color, rect))
                 x += width + 8
             if grouped_actions:
@@ -1390,13 +1491,17 @@ class BOX:
 
     def toolbar_item_at(self, actions, context, screen_position):
         for kind, value, _, _, rect in self._toolbar_items(actions, context):
-            if rect.collidepoint(screen_position):
+            if kind in ('group', 'action') and rect.collidepoint(screen_position):
                 return kind, value
         return None
 
     def draw_toolbar(self, actions, context):
-        for _, _, label, color, rect in self._toolbar_items(actions, context):
+        for kind, _, label, color, rect in self._toolbar_items(actions, context):
             pygame.draw.rect(self.screen, color, rect, border_radius=4)
+            if kind == 'pair':
+                text = self.toolbar_font.render(label, True, (255, 255, 255))
+                self.screen.blit(text, text.get_rect(midleft=(rect.left + 8, rect.centery)))
+                continue
             text = self.toolbar_font.render(label, True, (255, 255, 255))
             self.screen.blit(text, text.get_rect(center=rect.center))
     
@@ -1430,6 +1535,8 @@ def empty_graph(**kwargs):
     for key, value in kwargs.items():
         graph.graph[key] = value
     return graph
+
+# Application loop
 
 def is_event_left(event,CTRL_activated):
     """Return True if the event should be treated as a left-click."""
@@ -1624,16 +1731,72 @@ def main(actions=(), graph_file=None, **kwargs):
         box.radial_divisions = max(2, box.radial_divisions - 1)
 
     def increase_radial_divisions(context):
-        box.radial_divisions += 1
+        box.radial_divisions = min(12, box.radial_divisions + 1)
+
+    def change_color_count(context, attribute, delta):
+        minimum, maximum = 1, 12
+        count = max(minimum, min(maximum, context.graph.graph[attribute] + delta))
+        context.graph.graph[attribute] = count
+        if attribute == 'num_vertex_colors':
+            for _, data in context.graph.nodes(data=True):
+                data['col'] = data.get('col', 0) % count
+            box.vertex_color %= count
+        else:
+            for _, _, data in context.graph.edges(data=True):
+                data['col'] = data.get('col', 0) % count
+            box.edge_color %= count
+
+    def toggle_vertex_labels(context):
+        context.graph.graph['show_vertex_labels'] = not context.graph.graph.get('show_vertex_labels', True)
+
+    def toggle_directed(context):
+        if context.graph.graph.get('graph_type') == 'graph':
+            context.graph.graph['graph_type'] = 'digraph'
+            return
+        for source, target, data in list(context.graph.edges(data=True)):
+            if not context.graph.has_edge(target, source):
+                context.graph.add_edge(target, source, **copy.deepcopy(data))
+        context.graph.graph['graph_type'] = 'graph'
 
     def save_tikz(context):
         from tikz_export import save_tikz_dialog
 
         tikz_path = save_tikz_dialog(context.graph, graph_path.with_suffix('.tex'))
         if tikz_path is not None:
-            print(f"TikZ saved in {tikz_path}")
+            box.write(f"TikZ saved:\n{tikz_path.name}", 3, (.8, .2))
+
+    def save_graph(context):
+        write_graph_file(context.graph, graph_path)
+        box.write(f"Saved:\n{graph_path.name}", 3, (.8, .2))
+
+    def save_graph_as(context):
+        nonlocal graph_path
+        new_path = choose_graph_file(graph_path, save=True)
+        if new_path is None:
+            return
+        graph_path = new_path
+        save_graph(context)
+
+    def load_graph(context):
+        nonlocal graph_path, history, history_pos
+        new_path = choose_graph_file(graph_path)
+        if new_path is None:
+            return
+        loaded = convert_from_file(new_path, kwargs)
+        graph_path = new_path
+        interaction.selection.clear()
+        interaction.cancel_gesture()
+        box.reset_edge_color()
+        context.replace_graph(loaded)
+        history = [_serialize_graph(loaded)]
+        history_pos = 0
+        box.write(f"Loaded:\n{graph_path.name}", 3, (.8, .2))
 
     built_in_actions = [
+        Action('load', 'Load', 'Ctrl+O', load_graph, lambda context: True, library=True, group='file'),
+        Action('save', 'Save', 'Ctrl+S', save_graph, lambda context: True, library=True, group='file'),
+        Action('save_as', 'Save as', 'Shift+Ctrl+S', save_graph_as, lambda context: True, library=True, group='file'),
+        Action('save_tikz', 'Export TikZ', None, save_tikz, lambda context: bool(graph.number_of_nodes()), library=True, group='file'),
         Action('color', 'Color', 'C', change_color, lambda context: (
             bool(context.selection.nodes or context.selection.edges)
             or interaction.creating_edge
@@ -1648,7 +1811,6 @@ def main(actions=(), graph_file=None, **kwargs):
         Action('reset', 'Reset', 'Space', reset_graph, lambda context: bool(graph.number_of_nodes() or graph.number_of_edges())),
         Action('copy', 'Copy', 'Ctrl+C', copy_graph_action, lambda context: bool(graph.number_of_nodes())),
         Action('paste', 'Paste', 'Ctrl+V', paste_graph, lambda context: graph_clipboard is not None and bool(graph_clipboard.nodes)),
-        Action('save_tikz', 'Save TikZ', 'Ctrl+S', save_tikz, lambda context: bool(graph.number_of_nodes())),
         Action('delete', 'Delete', 'Del', delete_selection, lambda context: bool(
             context.selection.nodes or context.selection.edges or interaction.selected_curve_point
         )),
@@ -1665,29 +1827,68 @@ def main(actions=(), graph_file=None, **kwargs):
             library=True, group='grid', checked=lambda context: box.grid_mode == 'radial',
         ),
         Action(
-            'grid_unit_increase', 'Grid unit ++', None,
-            increase_grid_unit,
-            lambda context: box.grid_mode is not None and box.grid_unit_scale < 10.0,
-            library=True, group='grid',
-        ),
-        Action(
-            'grid_unit_decrease', 'Grid unit --', None,
+            'grid_unit_decrease', 'Grid unit', None,
             decrease_grid_unit,
             lambda context: box.grid_mode is not None and box.grid_unit_scale > 0.25,
-            library=True, group='grid',
+            library=True, group='grid', pair_label='Grid unit', pair_id='grid_unit',
         ),
         Action(
-            'radial_divisions_increase',
-            'Radial ++', None,
-            increase_radial_divisions,
-            lambda context: box.grid_mode == 'radial',
-            library=True, group='grid',
+            'grid_unit_increase', 'Grid unit', None,
+            increase_grid_unit,
+            lambda context: box.grid_mode is not None and box.grid_unit_scale < 10.0,
+            library=True, group='grid', pair_label='Grid unit', pair_id='grid_unit',
         ),
         Action(
-            'radial_divisions_decrease', 'Radial --', None,
+            'radial_divisions_decrease', 'Radial', None,
             decrease_radial_divisions,
             lambda context: box.grid_mode == 'radial' and box.radial_divisions > 2,
-            library=True, group='grid',
+            library=True, group='grid', pair_label=lambda context: f'Radial: {box.radial_divisions}', pair_id='radial_divisions',
+        ),
+        Action(
+            'radial_divisions_increase', 'Radial', None,
+            increase_radial_divisions,
+            lambda context: box.grid_mode == 'radial' and box.radial_divisions < 12,
+            library=True, group='grid', pair_label=lambda context: f'Radial: {box.radial_divisions}', pair_id='radial_divisions',
+        ),
+        Action(
+            'vertex_labels', 'Vertex labels', None,
+            toggle_vertex_labels, lambda context: True,
+            library=True, group='graph_properties',
+            checked=lambda context: context.graph.graph.get('show_vertex_labels', True),
+        ),
+        Action(
+            'vertex_colors_decrease', 'Vertex colors', None,
+            lambda context: change_color_count(context, 'num_vertex_colors', -1),
+            lambda context: context.graph.graph['num_vertex_colors'] > 1,
+            library=True, group='graph_properties',
+            pair_label=lambda context: f"Vertex colors: {context.graph.graph['num_vertex_colors']}", pair_id='vertex_colors',
+        ),
+        Action(
+            'vertex_colors_increase', 'Vertex colors', None,
+            lambda context: change_color_count(context, 'num_vertex_colors', 1),
+            lambda context: context.graph.graph['num_vertex_colors'] < 12,
+            library=True, group='graph_properties',
+            pair_label=lambda context: f"Vertex colors: {context.graph.graph['num_vertex_colors']}", pair_id='vertex_colors',
+        ),
+        Action(
+            'edge_colors_decrease', 'Edge colors', None,
+            lambda context: change_color_count(context, 'num_edge_colors', -1),
+            lambda context: context.graph.graph['num_edge_colors'] > 1,
+            library=True, group='graph_properties',
+            pair_label=lambda context: f"Edge color: {context.graph.graph['num_edge_colors']}", pair_id='edge_colors',
+        ),
+        Action(
+            'edge_colors_increase', 'Edge colors', None,
+            lambda context: change_color_count(context, 'num_edge_colors', 1),
+            lambda context: context.graph.graph['num_edge_colors'] < 12,
+            library=True, group='graph_properties',
+            pair_label=lambda context: f"Edge color: {context.graph.graph['num_edge_colors']}", pair_id='edge_colors',
+        ),
+        Action(
+            'directed', 'Directed', None,
+            toggle_directed, lambda context: True,
+            library=True, group='graph_properties',
+            checked=lambda context: context.graph.graph.get('graph_type') == 'digraph',
         ),
     ]
     for action in built_in_actions:
@@ -1793,7 +1994,6 @@ def main(actions=(), graph_file=None, **kwargs):
         ti.sleep(.01)
 
     if not running:
-        graph_path.parent.mkdir(parents=True, exist_ok=True)
-        nx.write_graphml(convert_position(graph), graph_path)
+        write_graph_file(graph, graph_path)
         print(f"Graph saved in {graph_path}")
         pygame.quit()

@@ -1,6 +1,8 @@
 import networkx as nx
+import pytest
 
-from graph_builder_lib import convert_from_file, convert_position, empty_graph
+from graph_builder import complement, contract, degree_summary, randomize, rotate, switch, twin
+from graph_builder_lib import _edge_curve_points, _set_edge_curve_points, convert_from_file, convert_position, empty_graph
 import tikz_export
 from tikz_export import graph_to_tikz, write_tikz
 
@@ -45,3 +47,54 @@ def test_tikz_dialog_falls_back_when_no_dialog_is_available(tmp_path, monkeypatc
 
     assert output == tmp_path / 'fallback.tex'
     assert output.exists()
+
+
+def test_selection_transformations_preserve_undirected_editor_graphs():
+    graph = nx.DiGraph(graph_type='graph', num_edge_colors=3, num_vertex_colors=4)
+    for node, position in [('0', (0, 0)), ('1', (20, 0)), ('2', (40, 0))]:
+        graph.add_node(node, position=position, col=1)
+    graph.add_edge('0', '1', col=0)
+    graph.add_edge('1', '0', col=0)
+
+    twin(graph, {'0', '1'})
+    assert graph.number_of_nodes() == 5
+    assert graph.has_edge('3', '1') and graph.has_edge('4', '0')
+
+    switch(graph, {'0'})
+    assert graph.edges['0', '1']['col'] == graph.edges['1', '0']['col'] == 1
+    switch(graph, {'0', '1'})
+    assert graph.edges['0', '1']['col'] == graph.edges['1', '0']['col'] == 1
+
+    complement(graph, {'0', '2'})
+    assert graph.has_edge('0', '2') and graph.has_edge('2', '0')
+
+    contracted = contract(graph, {'0', '1'})
+    assert contracted.number_of_nodes() == 4
+    assert 'Degree' in degree_summary(contracted)
+
+
+def test_rotate_moves_edge_curve_points_with_the_graph():
+    graph = empty_graph(graph_type='graph', num_edge_colors=2, num_vertex_colors=2)
+    graph.add_node('0', position=(0, 0), col=0)
+    graph.add_node('1', position=(10, 0), col=0)
+    graph.add_edge('0', '1', col=0)
+    graph.add_edge('1', '0', col=0)
+    _set_edge_curve_points(graph, '0', '1', [(5, 2)])
+
+    rotate(graph, {'0'}, 90)
+
+    assert graph.nodes['1']['position'] == pytest.approx((0, 10))
+    assert _edge_curve_points(graph, '0', '1')[0] == pytest.approx((-2, 5))
+
+
+def test_randomize_replaces_only_induced_edges():
+    graph = empty_graph(graph_type='graph', num_edge_colors=2, num_vertex_colors=2)
+    for node in ('0', '1', '2'):
+        graph.add_node(node, position=(0, 0), col=0)
+    graph.add_edge('0', '2', col=1)
+    graph.add_edge('2', '0', col=1)
+
+    randomize(graph, {'0', '1'}, random_source=lambda: 0.25)
+
+    assert graph.has_edge('0', '1') and graph.has_edge('1', '0')
+    assert graph.has_edge('0', '2') and graph.has_edge('2', '0')
