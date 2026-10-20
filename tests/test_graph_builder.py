@@ -2,7 +2,10 @@ import networkx as nx
 import pytest
 
 from graph_builder import complement, contract, degree_summary, randomize, rotate, switch, twin
-from graph_builder_lib import _edge_curve_points, _set_edge_curve_points, convert_from_file, convert_position, empty_graph
+from graph_builder_lib import (
+    _edge_curve_points, _set_edge_curve_points, convert_from_file, convert_position,
+    empty_graph, set_edge_label, vertex_label,
+)
 import tikz_export
 from tikz_export import graph_to_tikz, write_tikz
 
@@ -35,6 +38,24 @@ def test_tikz_export_writes_a_portable_file(tmp_path):
     assert r'\begin{tikzpicture}' in tikz
     assert '->' in tikz
     assert output.read_text(encoding='utf-8') == tikz
+
+
+def test_display_labels_are_independent_from_ids_and_are_exported_to_tikz():
+    graph = empty_graph(graph_type='graph')
+    graph.add_node('internal-a', position=(0, 0), col=0, label='x_1')
+    graph.add_node('internal-b', position=(10, 0), col=1, label='x_1')
+    graph.add_edge('internal-a', 'internal-b', col=0)
+    graph.add_edge('internal-b', 'internal-a', col=0)
+    set_edge_label(graph, 'internal-a', 'internal-b', 'e_1')
+
+    tikz = graph_to_tikz(graph)
+
+    assert vertex_label(graph, 'internal-a') == vertex_label(graph, 'internal-b') == 'x_1'
+    assert graph.has_node('internal-a') and graph.has_node('internal-b')
+    assert graph.edges['internal-a', 'internal-b']['label'] == 'e_1'
+    assert graph.edges['internal-b', 'internal-a']['label'] == 'e_1'
+    assert r'{x\_1}' in tikz
+    assert r'{e\_1}' in tikz
 
 
 def test_tikz_dialog_falls_back_when_no_dialog_is_available(tmp_path, monkeypatch):

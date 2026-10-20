@@ -367,6 +367,17 @@ def _edge_screen_samples(graph, box, source, target):
     return _interpolating_curve_samples(start, end, controls)
 
 
+def _edge_label_screen_position(graph, box, source, target):
+    """Return the visual midpoint of an edge, including its curved path."""
+    controls = _edge_curve_points(graph, source, target)
+    if not controls:
+        start = _real_to_screen_unclipped(box, graph.nodes[source]['position'])
+        end = _real_to_screen_unclipped(box, graph.nodes[target]['position'])
+        return ((start[0] + end[0]) // 2, (start[1] + end[1]) // 2)
+    samples = _edge_screen_samples(graph, box, source, target)
+    return samples[len(samples) // 2] if samples else None
+
+
 # Selection, clipboard, and action abstractions
 
 class EdgeRef:
@@ -674,6 +685,38 @@ def _shortcut_for_key(event, modifiers):
 
 # Pointer interaction state
 
+@dataclass
+class TextEditState:
+    """The small, modal inline editor used for vertex and edge labels."""
+    kind: str
+    target: Any
+    value: str
+    cursor: int
+    select_all: bool = True
+
+
+def vertex_label(graph, node):
+    """Return a node's visible label, defaulting to its stable internal id."""
+    return str(graph.nodes[node].get('label', node))
+
+
+def edge_label(graph, source, target):
+    """Return an edge's visible label; edges are deliberately blank by default."""
+    return str(graph.edges[source, target].get('label', ''))
+
+
+def set_edge_label(graph, source, target, label):
+    """Set a logical edge label, mirroring it for the editor's undirected graphs."""
+    graph.edges[source, target]['label'] = label
+    if graph.graph.get('graph_type') == 'graph' and graph.has_edge(target, source):
+        graph.edges[target, source]['label'] = label
+
+
+def labels_visible(graph):
+    """Read the shared label-display preference, including older saved graphs."""
+    return graph.graph.get('show_labels', graph.graph.get('show_vertex_labels', True))
+
+
 class InteractionController:
     """Own pointer hit-testing, selection, and in-progress mouse gestures."""
     def __init__(self):
@@ -690,6 +733,114 @@ class InteractionController:
         self.move_start_real = None
         self.move_start_positions = {}
         self.selected_curve_point = None
+        self.text_edit = None
+        self.last_primary_click = None
+
+    @property
+    def editing_text(self):
+        return self.text_edit is not None
+
+    def start_label_edit(self, graph, element):
+        """Open the inline editor for a hit-tested node or logical edge."""
+        kind, target = element
+        if kind == 'node':
+            value = vertex_label(graph, target)
+            self.selection.select(graph, element)
+        else:
+            source, target = target
+            edge = self.selection.edge_ref(graph, source, target)
+            self.selection.select(graph, ('edge', (source, target)))
+            target = edge
+            value = edge_label(graph, edge.source, edge.target)
+        self.cancel_gesture()
+        self.text_edit = TextEditState(kind, target, value, len(value))
+        try:
+            pygame.key.start_text_input()
+        except AttributeError:
+            pass
+
+    def finish_label_edit(self, graph, commit=True):
+        """Close the editor and, if requested, apply its value as a display label."""
+        edit = self.text_edit
+        if edit is None:
+            return False
+        self.text_edit = None
+        try:
+            pygame.key.stop_text_input()
+        except AttributeError:
+            pass
+        if not commit:
+            return False
+        if edit.kind == 'node':
+            graph.nodes[edit.target]['label'] = edit.value
+        else:
+            set_edge_label(graph, edit.target.source, edit.target.target, edit.value)
+        return True
+
+    def handle_text_input(self, text):
+        """Insert committed Unicode text from Pygame's platform text-input event."""
+        if self.text_edit is None:
+            return False
+        edit = self.text_edit
+        if edit.select_all:
+            edit.value = ''
+            edit.cursor = 0
+            edit.select_all = False
+        edit.value = edit.value[:edit.cursor] + text + edit.value[edit.cursor:]
+        edit.cursor += len(text)
+        return True
+
+    def handle_text_key(self, event, graph):
+        """Handle editor keys.  Return ``(handled, commit_changed)``."""
+        if self.text_edit is None:
+            return False, False
+        edit = self.text_edit
+        if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+            return True, self.finish_label_edit(graph)
+        if event.key == pygame.K_ESCAPE:
+            self.finish_label_edit(graph, commit=False)
+            return True, False
+        if event.key == pygame.K_BACKSPACE:
+            if edit.select_all:
+                edit.value = ''
+                edit.cursor = 0
+                edit.select_all = False
+                return True, False
+            if edit.cursor:
+                edit.value = edit.value[:edit.cursor - 1] + edit.value[edit.cursor:]
+                edit.cursor -= 1
+            return True, False
+        if event.key == pygame.K_DELETE:
+            if edit.select_all:
+                edit.value = ''
+                edit.cursor = 0
+                edit.select_all = False
+                return True, False
+            edit.value = edit.value[:edit.cursor] + edit.value[edit.cursor + 1:]
+            return True, False
+        if event.key == pygame.K_LEFT:
+            if edit.select_all:
+                edit.select_all = False
+                edit.cursor = 0
+                return True, False
+            edit.cursor = max(0, edit.cursor - 1)
+            return True, False
+        if event.key == pygame.K_RIGHT:
+            if edit.select_all:
+                edit.select_all = False
+                edit.cursor = len(edit.value)
+                return True, False
+            edit.cursor = min(len(edit.value), edit.cursor + 1)
+            return True, False
+        if event.key == pygame.K_HOME:
+            edit.select_all = False
+            edit.cursor = 0
+            return True, False
+        if event.key == pygame.K_END:
+            edit.select_all = False
+            edit.cursor = len(edit.value)
+            return True, False
+        return True, False
 
     def hit_node(self, graph, position, min_distance=20):
         return closest_vertex(graph, position, min_distance=min_distance)
@@ -834,6 +985,35 @@ class InteractionController:
             return
 
         if event.button == 1:
+            # Pygame supplies ``clicks`` on current desktop builds, but it is
+            # absent on some installations.  Keep our own conservative timing
+            # fallback so double-click-to-rename is portable.
+            element = self.hit_test(graph, box, screen_position, real_position)
+            no_editing_modifier = not modifiers & (
+                pygame.KMOD_CTRL | pygame.KMOD_SHIFT | pygame.KMOD_ALT | pygame.KMOD_GUI
+            )
+            now = getattr(event, 'timestamp', pygame.time.get_ticks())
+            element_key = None
+            if element is not None:
+                if element[0] == 'node':
+                    element_key = ('node', element[1])
+                else:
+                    source, target = element[1]
+                    element_key = ('edge', self.selection.edge_ref(graph, source, target))
+            previous = self.last_primary_click
+            repeated_click = (
+                previous is not None
+                and previous[0] == element_key
+                and now - previous[1] <= 450
+                and dist(screen_position, previous[2]) <= 8
+            )
+            self.last_primary_click = (element_key, now, screen_position)
+            if element is not None and no_editing_modifier and (
+                getattr(event, 'clicks', 1) >= 2 or repeated_click
+            ):
+                self.start_label_edit(graph, element)
+                self.last_primary_click = None
+                return
             curve_point = self._hit_selected_curve_point(graph, box, screen_position)
             if curve_point is not None:
                 self.selected_curve_point = curve_point
@@ -841,7 +1021,6 @@ class InteractionController:
                 self.gesture_button = event.button
                 return
 
-            element = self.hit_test(graph, box, screen_position, real_position)
             additive = bool(modifiers & pygame.KMOD_SHIFT)
             if additive and element is not None and element[0] == 'edge':
                 source, target = element[1]
@@ -1315,7 +1494,7 @@ class BOX:
         self._grid_surface = grid_surface
         self.screen.blit(grid_surface, (0, 0))
 
-    def draw_graph(self, graph, selection=None, edge_start=None, edge_color=None, selection_preview=None, edge_starts=None, selected_curve_point=None):
+    def draw_graph(self, graph, selection=None, edge_start=None, edge_color=None, selection_preview=None, edge_starts=None, selected_curve_point=None, text_edit=None):
         nodes = graph.nodes()
         arrow_type = graph.graph['graph_type']=='digraph'
         self.draw_grid()
@@ -1338,6 +1517,26 @@ class BOX:
                 if selection is not None and selection.has_edge(graph, v1, v2):
                     pygame.draw.line(self.screen, (0, 180, 90), p1, p2, 7)
                 draw_arrow(self.screen, p1, p2,arrow_tip=arrow_type,vertex_radius=self.vertex_radius,color=c)
+
+        # Edge labels deliberately remain optional: an unlabeled edge has no
+        # visual clutter, whereas a non-empty label is centred on its actual
+        # rendered path (including a curve).
+        drawn_labels = set()
+        for source, target in graph.edges if labels_visible(graph) else ():
+            label_key = (source, target) if arrow_type else frozenset((source, target))
+            if label_key in drawn_labels:
+                continue
+            drawn_labels.add(label_key)
+            label = edge_label(graph, source, target)
+            if not label:
+                continue
+            label_position = _edge_label_screen_position(graph, self, source, target)
+            if label_position is None:
+                continue
+            text = self.toolbar_font.render(label, True, (20, 20, 20))
+            background = text.get_rect(center=label_position).inflate(6, 4)
+            pygame.draw.rect(self.screen, (255, 255, 255), background, border_radius=3)
+            self.screen.blit(text, text.get_rect(center=label_position))
         preview_sources = tuple(edge_starts) if edge_starts is not None else (() if edge_start is None else (edge_start,))
         for source in preview_sources:
             p1 = self.real_to_screen(nodes[source]["position"])
@@ -1354,8 +1553,17 @@ class BOX:
                     pygame.draw.circle(self.screen, (0, 180, 90), p, self.vertex_radius + 4, 3)
                 pygame.draw.circle(self.screen, c, p, self.vertex_radius)
 
-                if graph.graph.get('show_vertex_labels', True):
-                    text = self.font.render(str(v), True, (255, 255, 255))
+                if labels_visible(graph):
+                    text = self.font.render(vertex_label(graph, v), True, (255, 255, 255))
+                    text_rect = text.get_rect(center=p)
+                    # A dark halo keeps a long white name readable even when it
+                    # extends beyond the black vertex onto the white canvas.
+                    outline = self.font.render(vertex_label(graph, v), True, (0, 0, 0))
+                    for dx, dy in (
+                        (-2, -1), (-2, 0), (-2, 1), (-1, -2), (-1, 2),
+                        (0, -2), (0, 2), (1, -2), (1, 2), (2, -1), (2, 0), (2, 1),
+                    ):
+                        self.screen.blit(outline, text_rect.move(dx, dy))
                     self.screen.blit(text, text.get_rect(center=p))
 
         if selection is not None:
@@ -1379,6 +1587,36 @@ class BOX:
             elif gesture == 'lasso' and len(points) >= 2:
                 pygame.draw.lines(self.screen, (0, 150, 130), False, points, 2)
 
+        if text_edit is not None:
+            if text_edit.kind == 'node' and text_edit.target in graph:
+                anchor = self.real_to_screen(graph.nodes[text_edit.target]['position'])
+                if anchor is not None:
+                    anchor = (anchor[0], anchor[1] - self.vertex_radius - 18)
+            else:
+                source, target = text_edit.target.source, text_edit.target.target
+                anchor = _edge_label_screen_position(graph, self, source, target)
+            if anchor is not None:
+                prompt = 'Vertex name' if text_edit.kind == 'node' else 'Edge name'
+                display = text_edit.value or ' '
+                text = self.toolbar_font.render(display, True, (20, 20, 20))
+                prompt_text = self.toolbar_font.render(prompt, True, (80, 80, 80))
+                width = max(150, text.get_width() + 26)
+                rect = pygame.Rect(0, 0, width, text.get_height() + prompt_text.get_height() + 14)
+                rect.midbottom = (anchor[0], anchor[1] - 4)
+                pygame.draw.rect(self.screen, (255, 255, 255), rect, border_radius=5)
+                pygame.draw.rect(self.screen, (35, 110, 120), rect, 2, border_radius=5)
+                self.screen.blit(prompt_text, (rect.x + 10, rect.y + 4))
+                text_position = (rect.x + 10, rect.y + prompt_text.get_height() + 7)
+                if text_edit.select_all and text_edit.value:
+                    pygame.draw.rect(self.screen, (45, 120, 190),
+                                     pygame.Rect(text_position, text.get_size()))
+                    text = self.toolbar_font.render(display, True, (255, 255, 255))
+                self.screen.blit(text, text_position)
+                cursor_x = rect.x + 10 + self.toolbar_font.size(text_edit.value[:text_edit.cursor])[0]
+                cursor_y = rect.y + prompt_text.get_height() + 6
+                pygame.draw.line(self.screen, (20, 20, 20), (cursor_x, cursor_y),
+                                 (cursor_x, cursor_y + text.get_height()), 1)
+
     def _toolbar_items(self, actions, context):
         items = []
         group_order = ['file', 'basic', 'grid', 'graph_properties', 'custom']
@@ -1393,8 +1631,12 @@ class BOX:
         header_y = 12
 
         def group_color(group, active=False):
-            """Keep each menu header and its controls in the same colour family."""
-            return (30, 112, 120) if group == 'custom' else (75, 88, 105)
+            """Use colour to show an open menu, not to classify its actions."""
+            return (30, 112, 120) if active else (75, 88, 105)
+
+        def pair_button_color(available):
+            """Keep increment controls visible without competing with toggles."""
+            return (96, 106, 118) if available else (75, 88, 105)
 
         for group in group_order:
             is_expanded = group in self.expanded_toolbar_groups
@@ -1456,7 +1698,7 @@ class BOX:
                             'action' if available else 'disabled',
                             pair_action if available else None,
                             symbol if available else '',
-                            group_color(group, available),
+                            pair_button_color(available),
                             button,
                         ))
                         button_x += button_width
@@ -1680,6 +1922,22 @@ def main(actions=(), graph_file=None, **kwargs):
         if not interaction.delete_selected_curve_point(graph):
             interaction.delete_selection(graph)
 
+    def rename_selected(context):
+        """Open the same inline label editor used by a double-click."""
+        node = context.selection.single_node()
+        if node is not None:
+            interaction.start_label_edit(graph, ('node', node))
+            return
+        if len(context.selection.edges) == 1 and not context.selection.nodes:
+            edge = next(iter(context.selection.edges))
+            interaction.start_label_edit(graph, ('edge', (edge.source, edge.target)))
+
+    def can_rename_selected(context):
+        return (
+            context.selection.single_node() is not None
+            or (len(context.selection.edges) == 1 and not context.selection.nodes)
+        )
+
     def deselect(context):
         interaction.selection.clear()
         interaction.cancel_gesture()
@@ -1746,8 +2004,8 @@ def main(actions=(), graph_file=None, **kwargs):
                 data['col'] = data.get('col', 0) % count
             box.edge_color %= count
 
-    def toggle_vertex_labels(context):
-        context.graph.graph['show_vertex_labels'] = not context.graph.graph.get('show_vertex_labels', True)
+    def toggle_labels(context):
+        context.graph.graph['show_labels'] = not labels_visible(context.graph)
 
     def toggle_directed(context):
         if context.graph.graph.get('graph_type') == 'graph':
@@ -1814,6 +2072,7 @@ def main(actions=(), graph_file=None, **kwargs):
         Action('delete', 'Delete', 'Del', delete_selection, lambda context: bool(
             context.selection.nodes or context.selection.edges or interaction.selected_curve_point
         )),
+        Action('rename', 'Rename', None, rename_selected, can_rename_selected),
         Action('cut', 'Cut edges to rest', 'T', cut_selected_edges, has_cuttable_edges),
         Action('add_curve_point', 'Add curve point', None, lambda context: interaction.add_curve_point_to_selection(graph), lambda context: bool(context.selection.edges)),
         Action(
@@ -1851,10 +2110,10 @@ def main(actions=(), graph_file=None, **kwargs):
             library=True, group='grid', pair_label=lambda context: f'Radial: {box.radial_divisions}', pair_id='radial_divisions',
         ),
         Action(
-            'vertex_labels', 'Vertex labels', None,
-            toggle_vertex_labels, lambda context: True,
+            'labels', 'Labels', None,
+            toggle_labels, lambda context: True,
             library=True, group='graph_properties',
-            checked=lambda context: context.graph.graph.get('show_vertex_labels', True),
+            checked=lambda context: labels_visible(context.graph),
         ),
         Action(
             'vertex_colors_decrease', 'Vertex colors', None,
@@ -1931,6 +2190,20 @@ def main(actions=(), graph_file=None, **kwargs):
             mods = pygame.key.get_mods()
             context = make_context(last_canvas_pos)
             toolbar_item = box.toolbar_item_at(all_actions, context, screen_pos)
+            # Text editing is modal: keys become text, not graph shortcuts.
+            # A click first accepts the edit, then carries out its usual action.
+            if interaction.editing_text and event.type == pygame.TEXTINPUT:
+                interaction.handle_text_input(event.text)
+                continue
+            if interaction.editing_text and event.type == pygame.KEYDOWN:
+                handled, changed = interaction.handle_text_key(event, graph)
+                if changed:
+                    save_state_if_changed()
+                if handled:
+                    continue
+            if interaction.editing_text and event.type == pygame.MOUSEBUTTONDOWN:
+                if interaction.finish_label_edit(graph):
+                    save_state_if_changed()
             if event.type in (pygame.MOUSEMOTION, pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP) and toolbar_item is None:
                 last_canvas_pos = pos
             if event.type == pygame.QUIT:
@@ -1987,6 +2260,7 @@ def main(actions=(), graph_file=None, **kwargs):
             interaction.selection_preview(),
             edge_starts=interaction.active_edge_sources(),
             selected_curve_point=interaction.selected_curve_point,
+            text_edit=interaction.text_edit,
         )
         box.draw_toolbar(all_actions, make_context(last_canvas_pos))
         box.draw_animations()

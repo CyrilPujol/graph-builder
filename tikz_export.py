@@ -24,6 +24,16 @@ def _rgb(color_index):
     return ','.join(str(channel) for channel in colormap_1(color_index))
 
 
+def _tikz_label(value):
+    """Render an editor label as literal LaTex text, rather than source code."""
+    replacements = {
+        '\\': r'\textbackslash{}', '&': r'\&', '%': r'\%', '$': r'\$',
+        '#': r'\#', '_': r'\_', '{': r'\{', '}': r'\}', '~': r'\textasciitilde{}',
+        '^': r'\textasciicircum{}',
+    }
+    return ''.join(replacements.get(character, character) for character in str(value))
+
+
 def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
     """Return TikZ source scaled to fit a predictable page-sized area."""
     nodes = list(graph.nodes)
@@ -72,7 +82,7 @@ def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
         r'\tikzstyle{vertex_origin}=[circle, draw=black, fill=white, minimum size=5pt, inner sep=0pt]',
     ]
     styles.extend(
-        f'\\tikzstyle{{vertex_{color_index}}}=[circle, draw=vertexcolor{color_index}, fill=vertexcolor{color_index}, minimum size=5pt, inner sep=0pt]'
+        f'\\tikzstyle{{vertex_{color_index}}}=[circle, draw=vertexcolor{color_index}, fill=vertexcolor{color_index}, text=white, minimum size=5pt, inner sep=0pt]'
         for color_index in vertex_colors
     )
     styles.extend(
@@ -93,7 +103,8 @@ def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
         style = 'vertex_origin' if node == 0 or node == '0' else f"vertex_{_color_index(graph.nodes[node])}"
         x, y = tikz_position(positions[node])
         lines.append(
-            f'    \\node[style={style}] ({node_ids[node]}) at ({x:.6f},{y:.6f}) {{}};'
+            f'    \\node[style={style}] ({node_ids[node]}) at ({x:.6f},{y:.6f}) '
+            f'{{{_tikz_label(graph.nodes[node].get("label", node))}}};'
         )
     lines.extend([
         r'  \end{pgfonlayer}',
@@ -104,6 +115,8 @@ def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
         color_index = _color_index(attributes)
         edge_style = f'edge_{color_index}'
         arrow = '->' if directed else '-'
+        label = _tikz_label(attributes.get('label', ''))
+        label_node = f' node[midway, fill=white, inner sep=1pt] {{{label}}}' if label else ''
         controls = _edge_curve_points(graph, source, target)
         if controls:
             samples = _interpolating_curve_samples(
@@ -114,12 +127,12 @@ def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
                 for x, y in samples
             )
             lines.append(
-                f'    \\draw[style={edge_style},{arrow}] plot coordinates {{{coordinates}}};'
+                f'    \\draw[style={edge_style},{arrow}] plot coordinates {{{coordinates}}}{label_node};'
             )
         else:
             lines.append(
                 f'    \\draw[style={edge_style},{arrow}] '
-                f'({node_ids[source]}) to ({node_ids[target]});'
+                f'({node_ids[source]}) to ({node_ids[target]}){label_node};'
             )
 
     lines.extend([
