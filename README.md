@@ -1,69 +1,96 @@
 # Graph Builder
 
-Graph Builder is a small, interactive graph editor built with Pygame and
-NetworkX. It supports directed and undirected coloured graphs, selection,
-copy/paste, curved edges, undo/redo, custom actions, GraphML persistence, and
-TikZ export.
+Graph Builder is a Python graph editor built with Qt and NetworkX. It edits
+directed or undirected coloured graphs, supports curved edges, labels, grids,
+selection, undo and redo, custom graph actions, GraphML files and TikZ export.
 
-## Install
+## Install and run
 
-Graph Builder supports Python 3.10 or later. In a terminal, create and
-activate a virtual environment, then install the project:
+Python 3.10 or newer is required. In the project folder:
 
 ```sh
 python -m venv .venv
-python -m pip install --upgrade pip
-python -m pip install -e .
 ```
 
-## Run
-
-Start a new editor session (the drawing is saved as `graph.graphml` in the
-directory from which you run the command):
+On macOS or Linux:
 
 ```sh
-python graph_builder.py
+.venv/bin/python -m pip install -e .
+.venv/bin/python graph_builder.py
 ```
 
-To edit a particular GraphML file instead:
+On Windows (PowerShell):
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e .
+.\.venv\Scripts\python.exe graph_builder.py
+```
+
+The project stays in place, so editing its Python files changes the app. Add
+`--graph path/to/drawing.graphml` to the launch command to open a specific file.
+By default, the editor opens `graph.graphml` in the current working directory,
+or creates that file when the graph is first saved. Named graphs save on close;
+an unsaved graph made with **File → New** asks before closing. File dialogs are
+supplied by Qt on macOS, Windows and Linux.
+
+## Editing
+
+The top menu row (File, Basic, Grid, Graph properties, Custom) shows one compact
+row of controls for the chosen menu. Click the active menu again to collapse the
+controls completely. The canvas uses a single interaction mode:
+
+- Left-click a vertex or edge to select it. Left-click empty space to create a
+  vertex. Drag a vertex to move it; drag empty space for a vertex-only rectangle
+  selection.
+- Right-drag (or Ctrl-left-drag) from a vertex to another vertex to toggle an
+  edge. Starting from a selected vertex applies this to every selected vertex.
+  With no selection, right-clicking a vertex without dragging deletes it.
+- Right-drag empty space for a lasso selection. A click on empty space clears an
+  existing selection. Option/Alt-drag or middle-drag pans, and the wheel zooms
+  around the pointer.
+- Hold Shift while clicking, rectangle-selecting or lasso-selecting to add;
+  Ctrl+Shift removes instead.
+- Double-click a vertex or edge, or choose **Basic → Rename** with exactly one
+  selected object, to change its visible label. Internal vertex IDs stay stable
+  and labels may repeat. **Delete** (or the Del key) removes the selection.
+- Select an edge and choose **Curve point** to add a point on its current path.
+  Drag an orange curve handle to reshape the edge; secondary-click a handle
+  (or select it and press Del) to remove it. Drag directly on a selected edge
+  to create a new curve point at the press position and move it in one gesture.
+- **Basic** also contains color, copy/paste, Cut selection, contract,
+  complement and rotation. **File** contains undo/redo, Select all and Fit graph.
+  **Grid** offers square or radial grids and a radial count up to 99. Its fixed
+  origin is `(0, 0)`, one coordinate unit is four vertex diameters, and the
+  default precision is `1/4`. Precision changes by exact factors of two without
+  moving untouched vertices. **Graph properties** controls labels, vertex/edge
+  color counts and directedness. **Custom** contains Degree, Twin, Switch and
+  Randomize.
+- Keyboard shortcuts include A for a curve point, C for color, L for labels, T
+  for Cut selection, D for degree, W for twin, S for switch, O for contract,
+  Esc to deselect, ⌘A to select all vertices, and the usual
+  platform shortcuts for save, copy, paste and undo/redo. Button tooltips show
+  the shortcut when one is available.
+
+**File → Export to TikZ** writes the visible vertex and edge labels to a `.tex`
+file. GraphML save/load keeps positions, colors, labels and edge curves.
+
+## Custom Python functions
+
+The UI is separate from graph operations. The actions in `graph_builder.py`
+show how to add a Python function to the **Custom** or **Basic** menu with
+`ContextAction` or `Action`. Such functions receive the
+NetworkX graph and can inspect `context.selection`. A function may edit the
+graph in place or return a new graph. No Qt code is needed for a graph
+transformation.
+
+The reusable data and action API is in `graph_builder_lib.py`; Qt canvas items
+are in `graph_builder_qt_canvas.py`, and menus/files/history are in
+`graph_builder_qt.py`.
+
+## Tests
 
 ```sh
-python graph_builder.py --graph path/to/drawing.graphml
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
-You can also run the module directly with `python graph_builder.py`. The
-`examples/` directory contains a sample graph and an example TikZ export.
-
-The **Save TikZ** toolbar action asks where to save the file. It uses the macOS
-native dialog on Mac and a native Tk dialog on Windows and Linux. If a dialog
-cannot open, it writes a `.tex` file next to the selected GraphML file.
-
-## Controls
-
-- Left-click empty space: add a vertex.
-- Left-click a vertex: select or drag it.
-- Right-click and drag: add or remove an edge.
-- Right-click and release on a vertex: delete it.
-- Mouse wheel: zoom.
-- `C`: cycle colour.
-- `Ctrl/Cmd+C`, `Ctrl/Cmd+V`: copy and paste.
-- `Ctrl/Cmd+Z`, `Shift+Ctrl/Cmd+Z`: undo and redo.
-- `T`: cut edges from the selection to the remaining vertices.
-- `Delete`, `Esc`, and Space: delete, deselect, and reset.
-
-The example application in `graph_builder.py` also supplies transformations
-such as twin, merge, full join, tensor product, and rotate. Add your own by
-constructing `GraphAction`, `VertexAction`, or `ContextAction` values and
-passing them to `graph_builder_lib.main`.
-
-## Development
-
-Run the non-interactive tests with:
-
-```sh
-python -m pytest
-```
-
-Only `networkx`, `numpy`, and `pygame` are runtime dependencies. TikZ export
-produces source only; compiling it is optional and requires a local LaTeX
-installation.
+On Windows, use `.\.venv\Scripts\python.exe` in place of `.venv/bin/python`.

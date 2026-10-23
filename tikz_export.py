@@ -2,15 +2,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-import platform
-import subprocess
-
-import networkx as nx
 
 from graph_builder_lib import (
     _edge_curve_points,
     _interpolating_curve_samples,
     colormap_1,
+    labels_visible,
 )
 
 def _color_index(attributes):
@@ -99,12 +96,14 @@ def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
     def tikz_position(position):
         return position[0] - min_x, max_y - position[1]
 
+    show_labels = labels_visible(graph)
     for node in nodes:
         style = 'vertex_origin' if node == 0 or node == '0' else f"vertex_{_color_index(graph.nodes[node])}"
         x, y = tikz_position(positions[node])
+        label = _tikz_label(graph.nodes[node].get('label', node)) if show_labels else ''
         lines.append(
             f'    \\node[style={style}] ({node_ids[node]}) at ({x:.6f},{y:.6f}) '
-            f'{{{_tikz_label(graph.nodes[node].get("label", node))}}};'
+            f'{{{label}}};'
         )
     lines.extend([
         r'  \end{pgfonlayer}',
@@ -115,8 +114,7 @@ def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
         color_index = _color_index(attributes)
         edge_style = f'edge_{color_index}'
         arrow = '->' if directed else '-'
-        label = _tikz_label(attributes.get('label', ''))
-        label_node = f' node[midway, fill=white, inner sep=1pt] {{{label}}}' if label else ''
+        label = _tikz_label(attributes.get('label', '')) if show_labels else ''
         controls = _edge_curve_points(graph, source, target)
         if controls:
             samples = _interpolating_curve_samples(
@@ -127,12 +125,22 @@ def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
                 for x, y in samples
             )
             lines.append(
-                f'    \\draw[style={edge_style},{arrow}] plot coordinates {{{coordinates}}}{label_node};'
+                f'    \\draw[style={edge_style},{arrow}] plot coordinates {{{coordinates}}};'
             )
+            label_position = samples[len(samples) // 2]
         else:
             lines.append(
                 f'    \\draw[style={edge_style},{arrow}] '
-                f'({node_ids[source]}) to ({node_ids[target]}){label_node};'
+                f'({node_ids[source]}) to ({node_ids[target]});'
+            )
+            label_position = (
+                (positions[source][0] + positions[target][0]) / 2,
+                (positions[source][1] + positions[target][1]) / 2,
+            )
+        if label:
+            x, y = tikz_position(label_position)
+            lines.append(
+                f'    \\node[fill=white, inner sep=1pt] at ({x:.6f},{y:.6f}) {{{label}}};'
             )
 
     lines.extend([
@@ -152,68 +160,3 @@ def write_tikz(graph, file_path, max_width_cm=14.0, max_height_cm=9.0):
         encoding='utf-8',
     )
     return path
-
-
-def _macos_save_path(default_path):
-    """Ask macOS for a destination using its native Save As dialog."""
-    escaped_name = default_path.name.replace('\\', '\\\\').replace('"', '\\"')
-    result = subprocess.run(
-        [
-            '/usr/bin/osascript',
-            '-e',
-            'POSIX path of (choose file name with prompt "Save graph as TikZ:" '
-            f'default name "{escaped_name}")',
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        return None
-    return Path(result.stdout.strip()) if result.stdout.strip() else None
-
-
-def _portable_save_path(default_path):
-    """Ask for a destination with Tk's native dialog on Windows and Linux."""
-    from tkinter import Tk, filedialog
-
-    root = Tk()
-    try:
-        root.withdraw()
-        root.attributes('-topmost', True)
-        selected = filedialog.asksaveasfilename(
-            title='Save graph as TikZ',
-            initialdir=str(default_path.parent),
-            initialfile=default_path.name,
-            defaultextension='.tex',
-            filetypes=[('TikZ files', '*.tex'), ('All files', '*.*')],
-        )
-    finally:
-        root.destroy()
-    return Path(selected) if selected else None
-
-
-def save_tikz_dialog(graph, default_path='graph.tex'):
-    """Ask where to save TikZ, with a safe non-interactive fallback.
-
-    macOS uses its familiar native dialog. Other desktop systems use Tk's
-    cross-platform file dialog. If the required dialog cannot be opened (for
-    example in a headless session), the export is written to ``default_path``.
-    Cancelling a working dialog does not write a file.
-    """
-    default_path = Path(default_path)
-    try:
-        if platform.system() == 'Darwin':
-            destination = _macos_save_path(default_path)
-        else:
-            destination = _portable_save_path(default_path)
-    except Exception:
-        # Tk can raise TclError when no graphical display is available. The
-        # fallback also covers systems where Tk is not installed.
-        destination = default_path
-
-    if destination is None:
-        return None
-    if not destination.suffix:
-        destination = destination.with_suffix('.tex')
-    return write_tikz(graph, destination)

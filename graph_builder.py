@@ -1,4 +1,4 @@
-"""Example graph-editor application with useful graph transformations."""
+"""Graph Builder entry point and editable examples of custom graph actions."""
 
 from __future__ import annotations
 
@@ -44,6 +44,8 @@ def twin(graph, vertices, return_new_vertices=False):
         for source, target, attributes in original_edges:
             if source == vertex:
                 graph.add_edge(new_vertex, target, **copy.deepcopy(attributes))
+                if not directed:
+                    graph.add_edge(target, new_vertex, **copy.deepcopy(attributes))
             if directed and target == vertex:
                 graph.add_edge(source, new_vertex, **copy.deepcopy(attributes))
     return (graph, new_vertices) if return_new_vertices else graph
@@ -185,11 +187,8 @@ def rotate(graph, vertices, degrees):
     return graph
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Interactive graph editor')
-    parser.add_argument('--graph', metavar='FILE', help='GraphML file to open and save')
-    args = parser.parse_args()
-
+def editor_actions():
+    """Register the example's graph actions without depending on Qt widgets."""
     def selected(context):
         return _selected_nodes(context.selection)
 
@@ -202,14 +201,21 @@ if __name__ == '__main__':
         context.selection.nodes.update(new_vertices)
         return graph
 
-    actions = [
+    return [
         ContextAction(show_degree, 'd', name='Degree'),
         ContextAction(make_twins, 'w', available=lambda context: bool(selected(context)), name='Twin'),
         ContextAction(lambda context: switch(context.graph, selected(context)), 's', available=lambda context: bool(selected(context)), name='Switch'),
         ContextAction(lambda context: contract(context.graph, selected(context)), 'o', available=lambda context: len(selected(context)) >= 2, name='Contract', group='basic'),
         ContextAction(lambda context: complement(context.graph, selected(context)), None, name='Complement', group='basic'),
         ContextAction(lambda context: randomize(context.graph, context.selection.nodes), None, name='Randomize'),
-        Action('custom:rotate_minus', 'Rotate', None, lambda context: rotate(context.graph, selected(context), -10), lambda context: len(selected(context)) == 1, group='basic', pair_label='Rotate', pair_id='rotate'),
-        Action('custom:rotate_plus', 'Rotate', None, lambda context: rotate(context.graph, selected(context), 10), lambda context: len(selected(context)) == 1, group='basic', pair_label='Rotate', pair_id='rotate'),
+        Action('custom:rotate_minus', 'Rotate −10°', None, lambda context: rotate(context.graph, selected(context), -10), lambda context: len(selected(context)) == 1, group='basic', pair_id='rotate', pair_label='Rotate'),
+        Action('custom:rotate_plus', 'Rotate +10°', None, lambda context: rotate(context.graph, selected(context), 10), lambda context: len(selected(context)) == 1, group='basic', pair_id='rotate', pair_label='Rotate'),
     ]
-    main(actions=actions, graph_file=args.graph, graph_type='graph', num_edge_colors=2, num_vertex_colors=4)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Interactive graph editor')
+    parser.add_argument('--graph', metavar='FILE', help='GraphML file to open and save')
+    args = parser.parse_args()
+    main(actions=editor_actions(), graph_file=args.graph,
+         graph_type='graph', num_edge_colors=2, num_vertex_colors=4)
