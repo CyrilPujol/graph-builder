@@ -12,11 +12,11 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QPointF, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QCursor, QKeySequence, QTransform
+from PySide6.QtGui import QAction, QActionGroup, QColor, QCursor, QKeySequence, QPalette, QTransform
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QHBoxLayout,
-    QLabel, QMainWindow, QMessageBox, QTabWidget, QToolBar, QToolButton,
-    QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout,
+    QLabel, QMainWindow, QMessageBox, QSpinBox, QStackedWidget, QTabWidget,
+    QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
 from graph_builder_lib import (
@@ -32,6 +32,7 @@ from graph_builder_qt_canvas import (
     GraphView, NodeItem,
 )
 from tikz_export import write_tikz
+from standard_graphs import STANDARD_GRAPHS, generate_standard_graph, validate_standard_graph
 
 
 class MessageSurface:
@@ -355,6 +356,60 @@ class GraphBuilderQt(QMainWindow):
                                                 self.edge_colors_up_action, properties_row)
         properties_row.addWidget(self.edge_colors_control)
 
+        standard_row = row('Standard graphs')
+        self.standard_graph_choice = QComboBox(standard_row)
+        self.standard_graph_choice.setMinimumWidth(190)
+        self.standard_graph_choice.setStyleSheet('''
+            QComboBox { color: #111111; background: #f5f6f7;
+                        border: 1px solid #b8bec4; border-radius: 4px;
+                        padding: 3px 8px; }
+            QComboBox QAbstractItemView { color: #111111; background: #ffffff;
+                                         selection-color: #111111;
+                                         selection-background-color: #d4e7e8; }
+        ''')
+        choice_palette = self.standard_graph_choice.palette()
+        for role in (QPalette.Text, QPalette.ButtonText, QPalette.WindowText):
+            choice_palette.setColor(role, QColor('#111111'))
+        choice_palette.setColor(QPalette.Button, QColor('#f5f6f7'))
+        choice_palette.setColor(QPalette.Base, QColor('#ffffff'))
+        self.standard_graph_choice.setPalette(choice_palette)
+        self.standard_parameter_stack = QStackedWidget(standard_row)
+        self.standard_parameter_inputs = {}
+        for definition in STANDARD_GRAPHS:
+            self.standard_graph_choice.addItem(definition.title, definition.key)
+            page = QWidget(self.standard_parameter_stack)
+            fields = QHBoxLayout(page)
+            fields.setContentsMargins(0, 0, 0, 0)
+            fields.setSpacing(5)
+            inputs = {}
+            for parameter in definition.parameters:
+                fields.addWidget(QLabel(parameter.label + ':', page))
+                if parameter.kind == 'probability':
+                    control = QDoubleSpinBox(page)
+                    control.setDecimals(3)
+                    control.setSingleStep(.05)
+                else:
+                    control = QSpinBox(page)
+                    if parameter.kind == 'optional_seed':
+                        control.setSpecialValueText('Random')
+                control.setRange(parameter.minimum, parameter.maximum)
+                control.setValue(parameter.default)
+                control.setFixedWidth(82 if parameter.kind == 'optional_seed' else 66)
+                control.valueChanged.connect(self._update_standard_graph_form)
+                fields.addWidget(control)
+                inputs[parameter.key] = control
+            self.standard_parameter_inputs[definition.key] = inputs
+            self.standard_parameter_stack.addWidget(page)
+        standard_row.addWidget(self.standard_graph_choice)
+        standard_row.addWidget(self.standard_parameter_stack)
+        self.standard_add_action = self._action('Add graph', lambda: self.add_standard_graph())
+        standard_row.addAction(self.standard_add_action)
+        self.standard_info_label = QLabel(standard_row)
+        self.standard_info_label.setStyleSheet('color: #555c63; padding-left: 8px;')
+        standard_row.addWidget(self.standard_info_label)
+        self.standard_graph_choice.currentIndexChanged.connect(self._change_standard_graph)
+        self._change_standard_graph()
+
         custom = [action for definition, action in self.extension_actions if definition.group != 'basic']
         row('Custom', custom)
         tabs.open_tab(0)
@@ -384,6 +439,80 @@ class GraphBuilderQt(QMainWindow):
         self.radial_label_action.setVisible(self.grid_mode == 'radial')
         self.grid_unit_control_action.setVisible(self.grid_mode is not None)
         self.radial_control_action.setVisible(self.grid_mode == 'radial')
+
+    def _change_standard_graph(self):
+        self.standard_parameter_stack.setCurrentIndex(self.standard_graph_choice.currentIndex())
+        page = self.standard_parameter_stack.currentWidget()
+        self.standard_parameter_stack.setFixedWidth(page.sizeHint().width())
+        self._update_standard_graph_form()
+
+    def _standard_parameters(self):
+        key = self.standard_graph_choice.currentData()
+        return {name: control.value()
+                for name, control in self.standard_parameter_inputs[key].items()}
+
+    def _update_standard_graph_form(self):
+        if not hasattr(self, 'standard_info_label'):
+            return
+        try:
+            _, vertices, edges = validate_standard_graph(
+                self.standard_graph_choice.currentData(), self._standard_parameters())
+        except ValueError as error:
+            message = str(error)
+            self.standard_info_label.setStyleSheet('color: #a12b2b; padding-left: 8px;')
+            self.standard_info_label.setText(message)
+            self.standard_info_label.setToolTip(message)
+            self.standard_add_action.setEnabled(False)
+        else:
+            edges_text = f'≈{edges:.0f}' if isinstance(edges, float) else str(edges)
+            self.standard_info_label.setStyleSheet('color: #555c63; padding-left: 8px;')
+            self.standard_info_label.setText(f'{vertices} vertices · {edges_text} edges')
+            self.standard_info_label.setToolTip('Expected size (random edge count is approximate)')
+            self.standard_add_action.setEnabled(True)
+
+    def add_standard_graph(self, key=None, parameters=None):
+        """Insert a named graph at the visible viewport center in one undo step."""
+        key = self.standard_graph_choice.currentData() if key is None else key
+        parameters = self._standard_parameters() if parameters is None else parameters
+        try:
+            generated = generate_standard_graph(key, parameters)
+        except ValueError as error:
+            self.report(str(error))
+            return set()
+        positions = generated.positions
+        xs = [point[0] for point in positions.values()]
+        ys = [point[1] for point in positions.values()]
+        midpoint = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+        width, height = max(xs) - min(xs), max(ys) - min(ys)
+        viewport = self.view.viewport()
+        pixels_per_unit = min(85.0, .75 * viewport.width() / max(width, 1),
+                              .75 * viewport.height() / max(height, 1))
+        pixels_per_unit = max(44.0, pixels_per_unit)
+        scene_per_unit = pixels_per_unit / self.view.transform().m11()
+        center = self.view.mapToScene(viewport.rect().center())
+        index = 0
+        new_ids = {}
+        for original in generated.graph:
+            while str(index) in self.graph:
+                index += 1
+            new_id = str(index)
+            new_ids[original] = new_id
+            index += 1
+            x, y = positions[original]
+            position = (center.x() + (x - midpoint[0]) * scene_per_unit,
+                        center.y() + (y - midpoint[1]) * scene_per_unit)
+            self.graph.add_node(new_id, position=position, col=self.vertex_color,
+                                label=generated.labels[original])
+        for source, target in generated.graph.edges:
+            first, second = new_ids[source], new_ids[target]
+            self.graph.add_edge(first, second, col=self.edge_color, label='')
+            self.graph.add_edge(second, first, col=self.edge_color, label='')
+        self.selection = SelectionState(set(new_ids.values()), set())
+        self.rebuild_scene()
+        self.commit_change()
+        self.statusBar().showMessage(
+            f'Added {len(new_ids)} vertices and {generated.graph.number_of_edges()} edges', 4000)
+        return set(new_ids.values())
 
     def selection_changed(self):
         if self._rebuilding or self._updating_handles:

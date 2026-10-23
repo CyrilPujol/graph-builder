@@ -14,4 +14,4 @@ dependencies = [
 ]
 
 [tool.setuptools]
-py-modules = ["graph_builder", "graph_builder_lib", "graph_builder_qt", "graph_builder_qt_canvas", "tikz_export"]
+py-modules = ["graph_builder", "graph_builder_lib", "graph_builder_qt", "graph_builder_qt_canvas", "standard_graphs", "tikz_export"]

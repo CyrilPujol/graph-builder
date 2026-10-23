@@ -8,6 +8,7 @@ from unittest.mock import patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QInputDialog
 
@@ -236,6 +237,90 @@ class QtEditorTests(unittest.TestCase):
         self.window.set_grid_unit(COORDINATE_UNIT * 16)
         self.assertTrue(self.window.grid_up_action.isEnabled())
         self.assertFalse(self.window.grid_down_action.isEnabled())
+
+    def test_standard_graph_form_remembers_parameters_and_validates(self):
+        self.assertEqual(self.window.menu_tabs.tabText(4), 'Standard graphs')
+        selector = self.window.standard_graph_choice
+        self.assertEqual(selector.palette().color(QPalette.Text).name(), '#111111')
+        kneser = selector.findData('kneser')
+        selector.setCurrentIndex(kneser)
+        n_input = self.window.standard_parameter_inputs['kneser']['n']
+        k_input = self.window.standard_parameter_inputs['kneser']['k']
+        n_input.setValue(6)
+        k_input.setValue(3)
+        self.assertTrue(self.window.standard_add_action.isEnabled())
+        self.assertIn('20 vertices', self.window.standard_info_label.text())
+        selector.setCurrentIndex(selector.findData('path'))
+        selector.setCurrentIndex(kneser)
+        self.assertEqual((n_input.value(), k_input.value()), (6, 3))
+        k_input.setValue(6)
+        self.assertFalse(self.window.standard_add_action.isEnabled())
+        self.assertIn('k < n', self.window.standard_info_label.text())
+        k_input.setValue(2)
+        self.assertTrue(self.window.standard_add_action.isEnabled())
+        selector.setCurrentIndex(selector.findData('paley'))
+        self.window.standard_parameter_inputs['paley']['p'].setValue(9)
+        self.assertFalse(self.window.standard_add_action.isEnabled())
+        self.assertIn('prime', self.window.standard_info_label.text())
+
+    def test_standard_graph_insert_center_selection_history_and_export(self):
+        self.window.add_node(QPointF(15, 25))
+        self.window.set_grid('square')
+        self.window.view.zoom_by_delta(240, QPointF(250, 200))
+        self.window.view.centerOn(500, -300)
+        self.app.processEvents()
+        viewport_center = self.window.view.mapToScene(
+            self.window.view.viewport().rect().center())
+        original_position = self.window.graph.nodes['0']['position']
+        inserted = self.window.add_standard_graph('path', {'n': 4})
+        self.assertEqual(len(inserted), 4)
+        self.assertEqual(self.window.selection.nodes, inserted)
+        self.assertFalse(self.window.selection.edges)
+        self.assertNotIn('0', inserted)
+        self.assertEqual(self.window.graph.nodes['0']['position'], original_position)
+        self.assertEqual(self.window.graph.number_of_edges(), 6)
+        xs = [self.window.graph.nodes[node]['position'][0] for node in inserted]
+        ys = [self.window.graph.nodes[node]['position'][1] for node in inserted]
+        self.assertAlmostEqual((min(xs)+max(xs))/2, viewport_center.x(), delta=2)
+        self.assertAlmostEqual((min(ys)+max(ys))/2, viewport_center.y(), delta=2)
+        self.assertTrue(any(x % self.window.grid_unit for x in xs))
+        self.assertEqual({self.window.graph.nodes[node]['label'] for node in inserted},
+                         {'0', '1', '2', '3'})
+        with tempfile.TemporaryDirectory() as folder:
+            self.window.path = Path(folder) / 'standard.graphml'
+            self.assertTrue(self.window.save_file())
+            loaded = convert_from_file(self.window.path)
+            self.assertEqual(loaded.number_of_nodes(), 5)
+            self.assertEqual(loaded.number_of_edges(), 6)
+            self.assertEqual({loaded.nodes[node]['label'] for node in inserted},
+                             {'0', '1', '2', '3'})
+        tikz = graph_to_tikz(self.window.graph)
+        self.assertIn('3', tikz)
+        self.window.undo()
+        self.assertEqual(self.window.graph.number_of_nodes(), 1)
+        self.window.redo()
+        self.assertEqual(self.window.graph.number_of_nodes(), 5)
+
+    def test_standard_graph_adds_bidirectional_edges_in_directed_document(self):
+        self.window.set_directed(True)
+        inserted = self.window.add_standard_graph('clique', {'n': 3})
+        self.assertEqual(len(inserted), 3)
+        self.assertEqual(self.window.graph.number_of_edges(), 6)
+        for source, target in self.window.graph.edges:
+            self.assertTrue(self.window.graph.has_edge(target, source))
+
+    def test_new_standard_graph_selection_drags_as_one_group(self):
+        inserted = self.window.add_standard_graph('path', {'n': 3})
+        before = {node: self.window.graph.nodes[node]['position'] for node in inserted}
+        start = self.position(*before[min(inserted)])
+        finish = start + QPointF(55, 35).toPoint()
+        canvas = self.window.view.viewport()
+        QTest.mousePress(canvas, Qt.LeftButton, pos=start)
+        QTest.mouseMove(canvas, pos=finish)
+        QTest.mouseRelease(canvas, Qt.LeftButton, pos=finish)
+        after = {node: self.window.graph.nodes[node]['position'] for node in inserted}
+        self.assertEqual(self.window.selection.nodes, inserted)
+        self.assertTrue(all(after[node] != before[node] for node in inserted))
 
     def test_menu_tabs_collapse_and_reopen(self):
         tabs = self.window.menu_tabs
