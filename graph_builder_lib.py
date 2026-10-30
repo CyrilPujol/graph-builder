@@ -138,6 +138,113 @@ def _set_edge_curve_points(graph, source, target, points):
         graph.edges[target, source].pop('curve_points', None)
 
 
+def contract(graph, vertices):
+    """Contract selected vertices (or selected-edge endpoints) into one vertex."""
+    vertices = set(vertices) & set(graph.nodes)
+    if len(vertices) < 2:
+        return graph
+    new_vertex = unused_label(graph)
+    positions = [graph.nodes[vertex]['position'] for vertex in vertices]
+    position = (sum(x for x, _ in positions) / len(positions),
+                sum(y for _, y in positions) / len(positions))
+    new_graph = graph.__class__()
+    new_graph.graph.update(copy.deepcopy(graph.graph))
+    for vertex, attributes in graph.nodes(data=True):
+        if vertex not in vertices:
+            new_graph.add_node(vertex, **copy.deepcopy(attributes))
+    representative = next(vertex for vertex in graph.nodes if vertex in vertices)
+    new_graph.add_node(new_vertex, position=position,
+                       col=graph.nodes[representative].get('col', 0))
+    for source, target, attributes in graph.edges(data=True):
+        source = new_vertex if source in vertices else source
+        target = new_vertex if target in vertices else target
+        if source != target:
+            new_graph.add_edge(source, target, **copy.deepcopy(attributes))
+    return new_graph
+
+
+def complement(graph, vertices):
+    """Complement the graph induced by ``vertices``, or the whole graph."""
+    vertices = set(vertices) & set(graph.nodes)
+    vertices = list(vertices or graph.nodes)
+    if graph.graph.get('graph_type') == 'graph':
+        for index, source in enumerate(vertices):
+            for target in vertices[index + 1:]:
+                if graph.has_edge(source, target) or graph.has_edge(target, source):
+                    graph.remove_edges_from(((source, target), (target, source)))
+                else:
+                    graph.add_edge(source, target, col=0)
+                    graph.add_edge(target, source, col=0)
+    else:
+        for source in vertices:
+            for target in vertices:
+                if source != target:
+                    if graph.has_edge(source, target):
+                        graph.remove_edge(source, target)
+                    else:
+                        graph.add_edge(source, target, col=0)
+    return graph
+
+
+def transform_selection(graph, vertices, transform):
+    """Transform selected vertices and their internal edge curves about their center."""
+    vertices = set(vertices) & set(graph.nodes)
+    if not vertices:
+        return graph
+    center_x = sum(graph.nodes[node]['position'][0] for node in vertices) / len(vertices)
+    center_y = sum(graph.nodes[node]['position'][1] for node in vertices) / len(vertices)
+
+    directed = graph.graph.get('graph_type') != 'graph'
+    seen_edges = set()
+    curve_points = {}
+    for source, target in graph.edges:
+        if source not in vertices and target not in vertices:
+            continue
+        edge_key = (source, target) if directed else frozenset((source, target))
+        if edge_key in seen_edges:
+            continue
+        seen_edges.add(edge_key)
+        curve_points[(source, target)] = _edge_curve_points(graph, source, target)
+
+    def transform_point(point):
+        x, y = transform(point[0] - center_x, point[1] - center_y)
+        return x + center_x, y + center_y
+
+    for vertex in vertices:
+        graph.nodes[vertex]['position'] = transform_point(graph.nodes[vertex]['position'])
+    for (source, target), points in curve_points.items():
+        if points:
+            transformed = ([transform_point(point) for point in points]
+                           if source in vertices and target in vertices else points)
+            _set_edge_curve_points(graph, source, target, transformed)
+    return graph
+
+
+def rotate(graph, vertices, degrees):
+    """Rotate selected vertices around the center of their positions."""
+    angle = degrees * pi / 180
+    return transform_selection(graph, vertices, lambda x, y: (
+        x * cos(angle) - y * sin(angle), x * sin(angle) + y * cos(angle)))
+
+
+def flip_horizontal(graph, vertices):
+    """Mirror the selection left-to-right across its vertical center line."""
+    return transform_selection(graph, vertices, lambda x, y: (-x, y))
+
+
+def flip_vertical(graph, vertices):
+    """Mirror the selection top-to-bottom across its horizontal center line."""
+    return transform_selection(graph, vertices, lambda x, y: (x, -y))
+
+
+def scale_selection(graph, vertices, factor):
+    """Scale selected positions and internal edge curves around their center."""
+    if factor <= 0:
+        raise ValueError('Scale factor must be positive.')
+    return transform_selection(graph, vertices,
+                               lambda x, y: (factor * x, factor * y))
+
+
 def _circular_arc_samples(start, through, end, steps=48):
     x0, y0 = start
     x1, y1 = through
@@ -197,6 +304,19 @@ def radial_grid_divisions(ring, main_divisions):
     while 2*ring*sin(pi/(2*divisions)) >= cell_threshold - 1e-9:
         divisions *= 2
     return divisions
+
+
+def radial_grid_new_spokes(maximum_radius, unit, main_divisions):
+    """Yield (start radius, angular index, divisions) for new radial half-lines."""
+    previous_divisions = main_divisions
+    for ring in range(1, min(1000, ceil(maximum_radius / unit) + 1)):
+        divisions = radial_grid_divisions(ring, main_divisions)
+        if divisions > previous_divisions:
+            step = divisions // previous_divisions
+            for index in range(divisions):
+                if index % step:
+                    yield ring * unit, index, divisions
+            previous_divisions = divisions
 
 
 def triangular_grid_point(i, j, center=(0, 0), unit=30):
@@ -410,6 +530,14 @@ class SelectionState:
         self.edges = {edge for edge in self.edges if graph.has_edge(edge.source, edge.target)}
 
 
+def selected_vertices(selection):
+    """Include the endpoints of selected edges in a vertex selection."""
+    vertices = set(selection.nodes)
+    for edge in selection.edges:
+        vertices.update((edge.source, edge.target))
+    return vertices
+
+
 @dataclass
 class GraphClipboard:
     nodes: tuple
@@ -455,6 +583,70 @@ def cut_edges_to_rest(graph, selected_nodes):
              if (source in selected) != (target in selected)]
     graph.remove_edges_from(edges)
     return len(edges)
+
+
+def pendant(graph, vertices, vertex_color=None, edge_color=0):
+    """Attach one well-spaced pendant vertex to each selected vertex.
+
+    A leaf grows away from its parent. At a branching vertex, the new edge
+    points into an open angular gap and avoids nearby occupied positions.
+    Return the new internal vertex IDs without changing the selection.
+    """
+    selected = set(vertices)
+    parents = [node for node in graph if node in selected]
+    if not parents:
+        return set()
+    occupied = [tuple(graph.nodes[node]['position']) for node in graph]
+    created = set()
+    directed = graph.graph.get('graph_type') != 'graph'
+    for parent in parents:
+        x, y = graph.nodes[parent]['position']
+        neighbors = set(graph.successors(parent)) | set(graph.predecessors(parent))
+        directions = []
+        lengths = []
+        for neighbor in neighbors:
+            nx, ny = graph.nodes[neighbor]['position']
+            dx, dy = nx - x, ny - y
+            length = hypot(dx, dy)
+            if length > 1e-6:
+                directions.append(atan2(dy, dx))
+                lengths.append(length)
+        spacing = max(75.0, min(220.0, sorted(lengths)[len(lengths)//2]
+                                  if lengths else 90.0))
+        if not directions:
+            preferred = -pi / 2
+        elif len(directions) == 1:
+            preferred = directions[0] + pi
+        else:
+            outward_x = -sum(cos(angle) for angle in directions)
+            outward_y = -sum(sin(angle) for angle in directions)
+            if hypot(outward_x, outward_y) > .25:
+                preferred = atan2(outward_y, outward_x)
+            else:
+                ordered = sorted(directions)
+                gap, start = max(((ordered[(i + 1) % len(ordered)] - angle) % (2*pi),
+                                  angle) for i, angle in enumerate(ordered))
+                preferred = start + gap / 2
+        offsets = (0, pi/6, -pi/6, pi/3, -pi/3, pi/2, -pi/2, pi)
+        candidates = []
+        for offset in offsets:
+            angle = preferred + offset
+            position = (x + spacing*cos(angle), y + spacing*sin(angle))
+            clearance = min((hypot(position[0]-px, position[1]-py)
+                             for px, py in occupied if hypot(px-x, py-y) > 1e-6),
+                            default=2.5 * spacing)
+            score = min(clearance, 2.5 * spacing) - spacing * abs(offset) / (3*pi)
+            candidates.append((score, -abs(offset), position))
+        position = max(candidates)[2]
+        new_vertex = unused_label(graph)
+        color = graph.nodes[parent].get('col', 0) if vertex_color is None else vertex_color
+        graph.add_node(new_vertex, position=position, col=color)
+        graph.add_edge(parent, new_vertex, col=edge_color, label='')
+        if not directed:
+            graph.add_edge(new_vertex, parent, col=edge_color, label='')
+        occupied.append(position)
+        created.add(new_vertex)
+    return created
 
 
 @dataclass
@@ -531,7 +723,81 @@ def EdgeAction(function, shortcut=None, name=None, group='custom'):
                          name or function.__name__, group)
 
 
-def main(actions=(), graph_file=None, **options):
-    """Launch the Qt editor with custom Python actions."""
+def builtin_editor_actions():
+    """Editing commands present regardless of a user's custom action script."""
+    def selected(context):
+        return selected_vertices(context.selection)
+
+    can_transform = lambda context: len(selected(context)) >= 2
+
+    def add_pendants(context):
+        interaction = context.interaction
+        pendant(context.graph, context.selection.nodes,
+                vertex_color=getattr(interaction, 'vertex_color', None),
+                edge_color=getattr(interaction, 'edge_color', 0))
+
+    return (
+        Action('builtin:contract', 'Contract', 'o',
+               lambda context: contract(context.graph, selected(context)),
+               can_transform, library=True, group='edition'),
+        Action('builtin:complement', 'Complement', None,
+               lambda context: complement(context.graph, selected(context)),
+               lambda context: True, library=True, group='edition'),
+        Action('builtin:pendant', 'Pendant', 'p', add_pendants,
+               lambda context: bool(context.selection.nodes), library=True, group='edition'),
+        Action('builtin:rotate_left', 'Rotate left 10°', None,
+               lambda context: rotate(context.graph, selected(context), -10),
+               can_transform, library=True, group='basic',
+               pair_id='transformation', pair_label='Transformation'),
+        Action('builtin:rotate_right', 'Rotate right 10°', None,
+               lambda context: rotate(context.graph, selected(context), 10),
+               can_transform, library=True, group='basic',
+               pair_id='transformation', pair_label='Transformation'),
+        Action('builtin:flip_horizontal', 'Flip horizontally', None,
+               lambda context: flip_horizontal(context.graph, selected(context)),
+               can_transform, library=True, group='basic',
+               pair_id='transformation', pair_label='Transformation'),
+        Action('builtin:flip_vertical', 'Flip vertically', None,
+               lambda context: flip_vertical(context.graph, selected(context)),
+               can_transform, library=True, group='basic',
+               pair_id='transformation', pair_label='Transformation'),
+        Action('builtin:half_turn', 'Central symmetry (180°)', None,
+               lambda context: rotate(context.graph, selected(context), 180),
+               can_transform, library=True, group='basic',
+               pair_id='transformation', pair_label='Transformation'),
+        Action('builtin:grow', 'Grow selection ×1.1', None,
+               lambda context: scale_selection(context.graph, selected(context), 1.1),
+               can_transform, library=True, group='basic',
+               pair_id='transformation', pair_label='Transformation'),
+        Action('builtin:shrink', 'Shrink selection ÷1.1', None,
+               lambda context: scale_selection(context.graph, selected(context), 1/1.1),
+               can_transform, library=True, group='basic',
+               pair_id='transformation', pair_label='Transformation'),
+    )
+
+
+from graph_builder_custom import button, discover_buttons
+
+
+def main(actions=None, graph_file=None, **options):
+    """Launch the editor, discovering registered buttons in the caller's module.
+
+    Explicit actions may be Action objects or @button-decorated functions.
+    """
+    import inspect
+    import argparse
+    if actions is None:
+        frame = inspect.currentframe()
+        try:
+            actions = discover_buttons(frame.f_back.f_globals)
+        finally:
+            del frame
+    else:
+        actions = [getattr(action, '__graph_button__', action) for action in actions]
+    if graph_file is None:
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument('--graph')
+        arguments, _ = parser.parse_known_args()
+        graph_file = arguments.graph
     from graph_builder_qt import launch
     return launch(actions=actions, graph_file=graph_file, **options)

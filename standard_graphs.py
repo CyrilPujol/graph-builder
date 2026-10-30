@@ -71,7 +71,7 @@ def _kneser_layout(graph, values):
     cannot do so at distinct planar points, so they use small inner rings.
     """
     n, k = values['n'], values['k']
-    if (n, k) == (5, 2):
+    if (n, k) == (5, 2) and len(graph) == 10:
         # KG(5,2) is the Petersen graph. The disjointness spokes line up when
         # the adjacent-pair orbit is shifted three steps relative to the
         # diagonal-pair orbit.
@@ -138,10 +138,52 @@ def _grid(graph, _values=None):
     return {(row, column): (1.5 * column, 1.5 * row) for row, column in graph}
 
 
-def _star(graph, _values=None):
-    positions = _circle(graph.subgraph(node for node in graph if node != 0))
-    positions[0] = (0.0, 0.0)
-    return positions
+def _regular_tree(values):
+    """Root has d children, other internal vertices have d - 1 children."""
+    graph = nx.Graph()
+    graph.add_node(())
+    level = [()]
+    for depth in range(values['depth']):
+        next_level = []
+        for parent in level:
+            children = values['degree'] if depth == 0 else values['degree'] - 1
+            for branch in range(1, children + 1):
+                child = (*parent, branch)
+                graph.add_edge(parent, child)
+                next_level.append(child)
+        level = next_level
+    return graph
+
+
+def _regular_tree_counts(values):
+    count, level = 1, 1
+    for depth in range(values['depth']):
+        level *= values['degree'] if depth == 0 else values['degree'] - 1
+        count += level
+    return count, count - 1
+
+
+def _regular_tree_layout(graph, values):
+    """Centered layered drawing with contiguous, evenly spaced leaf subtrees."""
+    positions = {}
+    leaf_index = 0
+
+    def place(node):
+        nonlocal leaf_index
+        children = sorted(neighbor for neighbor in graph[node]
+                          if len(neighbor) == len(node) + 1)
+        if children:
+            x = sum(place(child) for child in children) / len(children)
+        else:
+            x = 1.6 * leaf_index
+            leaf_index += 1
+        positions[node] = (x, 1.8 * len(node))
+        return x
+
+    place(())
+    center = (min(x for x, _ in positions.values()) +
+              max(x for x, _ in positions.values())) / 2
+    return {node: (x - center, y) for node, (x, y) in positions.items()}
 
 
 def _petersen(graph, _values=None):
@@ -266,6 +308,23 @@ def _kneser(n, k):
     return graph
 
 
+def _stable_subsets(n, k):
+    """k-subsets with no adjacent elements on the cycle of length n."""
+    for spaced in combinations(range(n - k + 1), k):
+        subset = tuple(value + index for index, value in enumerate(spaced))
+        if not (subset[0] == 0 and subset[-1] == n - 1):
+            yield subset
+
+
+def _schrijver(n, k):
+    graph = nx.Graph()
+    graph.add_nodes_from(_stable_subsets(n, k))
+    for source, target in combinations(graph, 2):
+        if set(source).isdisjoint(target):
+            graph.add_edge(source, target)
+    return graph
+
+
 def _paley(p):
     return nx.Graph(nx.paley_graph(p))
 
@@ -278,6 +337,17 @@ def _kneser_counts(values):
     n, k = values['n'], values['k']
     vertices = comb(n, k)
     return vertices, vertices * comb(n-k, k) // 2 if n >= 2*k else 0
+
+
+def _schrijver_counts(values):
+    n, k = values['n'], values['k']
+    vertices = n * comb(n-k, k) // (n-k)
+    if vertices > MAX_VERTICES:
+        return vertices, 0
+    nodes = list(_stable_subsets(n, k))
+    edges = sum(set(source).isdisjoint(target)
+                for source, target in combinations(nodes, 2))
+    return vertices, edges
 
 
 def _random_counts(values):
@@ -299,8 +369,10 @@ STANDARD_GRAPHS = (
                     _line, lambda v: (v['n'], v['n']-1)),
     GraphDefinition('cycle', 'Cycle Cₙ', (Parameter('n', 'Vertices', 5, 3, 1000),),
                     lambda v: nx.cycle_graph(v['n']), _circle, lambda v: (v['n'], v['n'])),
-    GraphDefinition('star', 'Star Sₙ', (Parameter('n', 'Leaves', 5, 1, 1000),),
-                    lambda v: nx.star_graph(v['n']), _star, lambda v: (v['n']+1, v['n'])),
+    GraphDefinition('regular_tree', 'Regular tree',
+                    (Parameter('degree', 'Degree', 3, 2, 1000),
+                     Parameter('depth', 'Depth', 2, 0, 20)),
+                    _regular_tree, _regular_tree_layout, _regular_tree_counts),
     GraphDefinition('grid', 'Rectangular grid',
                     (Parameter('rows', 'Rows', 3, 1, 1000),
                      Parameter('columns', 'Columns', 4, 1, 1000)),
@@ -318,6 +390,9 @@ STANDARD_GRAPHS = (
     GraphDefinition('kneser', 'Kneser KG(n,k)',
                     (Parameter('n', 'n', 5, 2, 1000), Parameter('k', 'k', 2, 1, 1000)),
                     lambda v: _kneser(v['n'], v['k']), _kneser_layout, _kneser_counts),
+    GraphDefinition('schrijver', 'Schrijver SG(n,k)',
+                    (Parameter('n', 'n', 5, 2, 1000), Parameter('k', 'k', 2, 1, 1000)),
+                    lambda v: _schrijver(v['n'], v['k']), _kneser_layout, _schrijver_counts),
     GraphDefinition('paley', 'Paley', (Parameter('p', 'Prime p', 5, 5, 1000),),
                     lambda v: _paley(v['p']), _paley_circle,
                     lambda v: (v['p'], v['p']*(v['p']-1)//4)),
@@ -352,6 +427,8 @@ def validate_standard_graph(key, supplied=None):
         values[parameter.key] = value
     if key == 'kneser' and values['k'] >= values['n']:
         raise ValueError('Kneser graphs require 1 ≤ k < n.')
+    if key == 'schrijver' and values['n'] < 2 * values['k']:
+        raise ValueError('Schrijver graphs require n ≥ 2k and k ≥ 1.')
     if key == 'paley' and (values['p'] % 4 != 1 or not _is_prime(values['p'])):
         raise ValueError('Paley p must be prime and congruent to 1 mod 4.')
     vertices, edges = definition.estimate(values)
@@ -376,8 +453,8 @@ def generate_standard_graph(key, supplied=None):
               for node in graph}
     if key == 'hypercube':
         labels = {node: ''.join(map(str, node)) for node in graph}
-    elif key == 'star':
-        labels[0] = 'c'
+    elif key == 'regular_tree':
+        labels = {node: '.'.join(map(str, node)) if node else 'r' for node in graph}
     elif key == 'bipartite':
         labels = {node: (f'A{node+1}' if node < values['a'] else
                          f'B{node-values["a"]+1}') for node in graph}

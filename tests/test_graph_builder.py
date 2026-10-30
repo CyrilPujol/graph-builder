@@ -6,17 +6,63 @@ from pathlib import Path
 
 import networkx as nx
 
-from graph_builder import complement, contract, degree_summary, randomize, rotate, switch, twin
+from graph_builder import randomize, switch, twin
+from graph_builder_custom import public_graph
+from graph_info import analyze
 from graph_builder_lib import (
     _edge_curve_points, _set_edge_curve_points, convert_from_file,
-    copy_graph_selection, empty_graph, paste_graph_selection, set_edge_label,
-    nearest_grid_point, radial_grid_divisions, triangular_grid_lines,
+    complement, contract, copy_graph_selection, empty_graph,
+    flip_horizontal, flip_vertical, paste_graph_selection, pendant, rotate,
+    scale_selection, set_edge_label,
+    nearest_grid_point, radial_grid_divisions, radial_grid_new_spokes,
+    triangular_grid_lines,
     triangular_grid_point, vertex_label, write_graph_file,
 )
 from tikz_export import graph_to_tikz, write_tikz
 
 
 class GraphTests(unittest.TestCase):
+    def test_pendant_grows_outward_and_repeated_uses_extend_a_tree(self):
+        graph = empty_graph()
+        graph.add_node('0', position=(0, 0), col=0)
+        graph.add_node('1', position=(100, 0), col=0)
+        graph.add_edge('0', '1', col=0)
+        graph.add_edge('1', '0', col=0)
+        first = pendant(graph, {'1'}, vertex_color=2, edge_color=1)
+        self.assertEqual(len(first), 1)
+        child = next(iter(first))
+        self.assertAlmostEqual(graph.nodes[child]['position'][0], 200)
+        self.assertAlmostEqual(graph.nodes[child]['position'][1], 0)
+        self.assertEqual(graph.nodes[child]['col'], 2)
+        self.assertTrue(graph.has_edge('1', child))
+        self.assertTrue(graph.has_edge(child, '1'))
+        self.assertEqual(graph.edges['1', child]['col'], 1)
+        grandchild = next(iter(pendant(graph, first)))
+        self.assertAlmostEqual(graph.nodes[grandchild]['position'][0], 300)
+        self.assertAlmostEqual(graph.nodes[grandchild]['position'][1], 0)
+        self.assertEqual(graph.degree[grandchild], 2)
+
+    def test_pendant_uses_one_arc_in_directed_graph(self):
+        graph = empty_graph(graph_type='digraph')
+        graph.add_node('root', position=(0, 0), col=1)
+        child = next(iter(pendant(graph, {'root'})))
+        self.assertTrue(graph.has_edge('root', child))
+        self.assertFalse(graph.has_edge(child, 'root'))
+        self.assertEqual(graph.nodes[child]['col'], 1)
+
+    def test_pendant_adds_distinct_leaves_for_every_selected_parent(self):
+        graph = empty_graph()
+        graph.add_node('left', position=(-50, 0), col=0)
+        graph.add_node('right', position=(50, 0), col=0)
+        graph.add_edge('left', 'right', col=0)
+        graph.add_edge('right', 'left', col=0)
+        leaves = pendant(graph, {'left', 'right'})
+        self.assertEqual(len(leaves), 2)
+        self.assertEqual(graph.number_of_nodes(), 4)
+        self.assertEqual(len({graph.nodes[node]['position'] for node in leaves}), 2)
+        self.assertEqual({parent for node in leaves for parent in graph.successors(node)},
+                         {'left', 'right'})
+
     def test_triangular_grid_nearest_point_and_negative_ties(self):
         unit = 20
         height = unit * sqrt(3) / 2
@@ -47,6 +93,12 @@ class GraphTests(unittest.TestCase):
 
     def test_radial_grid_uses_square_cell_threshold(self):
         self.assertEqual(radial_grid_divisions(3, 5), 20)
+
+    def test_one_unit_radial_spokes_keep_their_starting_radius(self):
+        spokes = list(radial_grid_new_spokes(4 * 136, 136, 5))
+        self.assertIn((2 * 136, 1, 10), spokes)
+        self.assertIn((3 * 136, 1, 20), spokes)
+        self.assertNotIn((136, 1, 10), spokes)
 
     def test_graphml_round_trip_preserves_graph_and_item_attributes(self):
         graph = empty_graph(graph_type='graph', num_edge_colors=3, num_vertex_colors=4)
@@ -118,21 +170,71 @@ class GraphTests(unittest.TestCase):
         self.assertTrue(graph.has_edge('0', '2') and graph.has_edge('2', '0'))
         contracted = contract(graph, {'0', '1'})
         self.assertEqual(contracted.number_of_nodes(), 4)
-        self.assertIn('Degree', degree_summary(contracted))
+        self.assertTrue(any(line.startswith('Degree min / avg / max:')
+                            for line in analyze(public_graph(contracted), 'Overview')))
 
-    def test_rotate_moves_edge_curve_points(self):
+    def test_transform_selection_moves_only_selected_vertices_and_internal_curves(self):
         graph = empty_graph(graph_type='graph')
         graph.add_node('0', position=(0, 0), col=0)
         graph.add_node('1', position=(10, 0), col=0)
+        graph.add_node('2', position=(20, 0), col=0)
         graph.add_edge('0', '1', col=0)
         graph.add_edge('1', '0', col=0)
+        graph.add_edge('1', '2', col=0)
+        graph.add_edge('2', '1', col=0)
         _set_edge_curve_points(graph, '0', '1', [(5, 2)])
-        rotate(graph, {'0'}, 90)
-        self.assertAlmostEqual(graph.nodes['1']['position'][0], 0)
-        self.assertAlmostEqual(graph.nodes['1']['position'][1], 10)
+        _set_edge_curve_points(graph, '1', '2', [(15, 2)])
+        rotate(graph, {'0', '1'}, 90)
+        self.assertAlmostEqual(graph.nodes['0']['position'][0], 5)
+        self.assertAlmostEqual(graph.nodes['0']['position'][1], -5)
+        self.assertAlmostEqual(graph.nodes['1']['position'][0], 5)
+        self.assertAlmostEqual(graph.nodes['1']['position'][1], 5)
+        self.assertEqual(graph.nodes['2']['position'], (20, 0))
         point = _edge_curve_points(graph, '0', '1')[0]
-        self.assertAlmostEqual(point[0], -2)
-        self.assertAlmostEqual(point[1], 5)
+        self.assertAlmostEqual(point[0], 3)
+        self.assertAlmostEqual(point[1], 0)
+        self.assertEqual(_edge_curve_points(graph, '1', '2'), [(15, 2)])
+
+    def test_reflections_and_half_turn_share_selection_center(self):
+        graph = empty_graph(graph_type='graph')
+        graph.add_node('0', position=(0, 0), col=0)
+        graph.add_node('1', position=(10, 20), col=0)
+        graph.add_node('2', position=(30, 40), col=0)
+        flip_horizontal(graph, {'0', '1'})
+        self.assertEqual(graph.nodes['0']['position'], (10, 0))
+        self.assertEqual(graph.nodes['1']['position'], (0, 20))
+        flip_vertical(graph, {'0', '1'})
+        self.assertEqual(graph.nodes['0']['position'], (10, 20))
+        self.assertEqual(graph.nodes['1']['position'], (0, 0))
+        rotate(graph, {'0', '1'}, 180)
+        self.assertAlmostEqual(graph.nodes['0']['position'][0], 0)
+        self.assertAlmostEqual(graph.nodes['0']['position'][1], 0)
+        self.assertAlmostEqual(graph.nodes['1']['position'][0], 10)
+        self.assertAlmostEqual(graph.nodes['1']['position'][1], 20)
+        self.assertEqual(graph.nodes['2']['position'], (30, 40))
+
+    def test_grow_and_shrink_move_internal_curves_but_not_boundary_curves(self):
+        graph = empty_graph()
+        for node, x in (('0', 0), ('1', 10), ('2', 20)):
+            graph.add_node(node, position=(x, 0), col=0)
+        for source, target in (('0', '1'), ('1', '2')):
+            graph.add_edge(source, target, col=0)
+            graph.add_edge(target, source, col=0)
+        _set_edge_curve_points(graph, '0', '1', [(5, 2)])
+        _set_edge_curve_points(graph, '1', '2', [(15, 2)])
+        scale_selection(graph, {'0', '1'}, 1.1)
+        self.assertAlmostEqual(graph.nodes['0']['position'][0], -.5)
+        self.assertAlmostEqual(graph.nodes['1']['position'][0], 10.5)
+        self.assertEqual(graph.nodes['2']['position'], (20, 0))
+        internal = _edge_curve_points(graph, '0', '1')[0]
+        self.assertAlmostEqual(internal[0], 5)
+        self.assertAlmostEqual(internal[1], 2.2)
+        self.assertEqual(_edge_curve_points(graph, '1', '2'), [(15, 2)])
+        scale_selection(graph, {'0', '1'}, 1 / 1.1)
+        self.assertAlmostEqual(graph.nodes['0']['position'][0], 0)
+        self.assertAlmostEqual(graph.nodes['1']['position'][0], 10)
+        self.assertAlmostEqual(_edge_curve_points(graph, '0', '1')[0][1], 2)
+        self.assertEqual(_edge_curve_points(graph, '1', '2'), [(15, 2)])
 
     def test_randomize_changes_only_induced_edges(self):
         graph = empty_graph(graph_type='graph')

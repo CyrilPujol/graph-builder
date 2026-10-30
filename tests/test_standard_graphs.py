@@ -18,12 +18,13 @@ class StandardGraphTests(unittest.TestCase):
             'bipartite': (6, 9),
             'path': (5, 4),
             'cycle': (5, 5),
-            'star': (6, 5),
+            'regular_tree': (10, 9),
             'grid': (12, 17),
             'hypercube': (8, 12),
             'dodecahedron': (20, 30),
             'icosahedron': (12, 30),
             'kneser': (10, 15),
+            'schrijver': (5, 5),
             'paley': (5, 5),
         }
         self.assertEqual(set(GRAPH_BY_KEY), expected.keys() | {'random'})
@@ -45,10 +46,15 @@ class StandardGraphTests(unittest.TestCase):
             ('bipartite', {'a': 2, 'b': 4}, (6, 8)),
             ('path', {'n': 1}, (1, 0)),
             ('cycle', {'n': 7}, (7, 7)),
-            ('star', {'n': 8}, (9, 8)),
+            ('regular_tree', {'degree': 4, 'depth': 2}, (17, 16)),
+            ('regular_tree', {'degree': 2, 'depth': 3}, (7, 6)),
+            ('regular_tree', {'degree': 3, 'depth': 0}, (1, 0)),
             ('grid', {'rows': 2, 'columns': 5}, (10, 13)),
             ('hypercube', {'d': 4}, (16, 32)),
             ('kneser', {'n': 6, 'k': 2}, (15, 45)),
+            ('schrijver', {'n': 6, 'k': 2}, (9, 18)),
+            ('schrijver', {'n': 7, 'k': 3}, (7, 7)),
+            ('schrijver', {'n': 4, 'k': 2}, (2, 1)),
             ('paley', {'p': 13}, (13, 39)),
         )
         for key, parameters, counts in cases:
@@ -57,9 +63,23 @@ class StandardGraphTests(unittest.TestCase):
                 self.assertEqual((generated.graph.number_of_nodes(),
                                   generated.graph.number_of_edges()), counts)
         self.assertEqual(generate_standard_graph('kneser').labels[(0, 1)], '0,1')
+        self.assertEqual(generate_standard_graph('schrijver').labels[(0, 2)], '0,2')
         self.assertEqual(generate_standard_graph('grid').labels[(1, 2)], '1,2')
         self.assertEqual(generate_standard_graph('hypercube').labels[(0, 1, 0)], '010')
-        self.assertEqual(generate_standard_graph('star').labels[0], 'c')
+        self.assertEqual(generate_standard_graph('regular_tree').labels[()], 'r')
+        self.assertEqual(generate_standard_graph('regular_tree').labels[(1, 2)], '1.2')
+
+    def test_regular_tree_degrees_depth_and_layered_drawing(self):
+        generated = generate_standard_graph('regular_tree', {'degree': 3, 'depth': 3})
+        graph = generated.graph
+        self.assertEqual(graph.degree[()], 3)
+        for node in graph:
+            self.assertEqual(generated.positions[node][1], 1.8 * len(node))
+            if len(node) < 3 and node:
+                self.assertEqual(graph.degree[node], 3)
+            if len(node) == 3:
+                self.assertEqual(graph.degree[node], 1)
+        self.assertEqual(len(set(generated.positions.values())), len(graph))
 
     def test_seeded_random_is_reproducible(self):
         first = generate_standard_graph('random', {'n': 12, 'p': .3, 'seed': 17})
@@ -105,6 +125,28 @@ class StandardGraphTests(unittest.TestCase):
         positions = {(round(x, 9), round(y, 9)) for x, y in generated.positions.values()}
         self.assertEqual(len(positions), generated.graph.number_of_nodes())
 
+    def test_schrijver_is_cyclically_stable_induced_kneser_subgraph(self):
+        for n, k in ((5, 2), (8, 3)):
+            with self.subTest(n=n, k=k):
+                generated = generate_standard_graph('schrijver', {'n': n, 'k': k})
+                kneser = generate_standard_graph('kneser', {'n': n, 'k': k}).graph
+                nodes = set(generated.graph)
+                self.assertEqual({frozenset(edge) for edge in generated.graph.edges},
+                                 {frozenset(edge) for edge in kneser.subgraph(nodes).edges})
+                for subset, (x, y) in generated.positions.items():
+                    self.assertTrue(all((value + 1) % n not in subset for value in subset))
+                    successor = tuple(sorted((value + 1) % n for value in subset))
+                    angle = 2*pi/n
+                    actual = generated.positions[successor]
+                    self.assertAlmostEqual(actual[0], x*cos(angle) - y*sin(angle))
+                    self.assertAlmostEqual(actual[1], x*sin(angle) + y*cos(angle))
+
+    def test_schrijver_large_parameters_are_guarded_before_generation(self):
+        with self.assertRaisesRegex(ValueError, 'Too large'):
+            validate_standard_graph('schrijver', {'n': 1000, 'k': 2})
+        self.assertEqual(validate_standard_graph('schrijver', {'n': 1000, 'k': 500})[1:],
+                         (2, 1))
+
     def test_kneser_fallback_for_older_networkx(self):
         with patch.object(nx, 'kneser_graph', None):
             generated = generate_standard_graph('kneser', {'n': 5, 'k': 2})
@@ -115,6 +157,7 @@ class StandardGraphTests(unittest.TestCase):
         invalid = (
             ('cycle', {'n': 2}),
             ('kneser', {'n': 5, 'k': 5}),
+            ('schrijver', {'n': 5, 'k': 3}),
             ('paley', {'p': 7}),
             ('paley', {'p': 9}),
             ('random', {'n': 10, 'p': 1.2}),
@@ -122,6 +165,8 @@ class StandardGraphTests(unittest.TestCase):
             ('clique', {'n': 200}),
             ('hypercube', {'d': 20}),
             ('grid', {'rows': 20, 'columns': 20}),
+            ('regular_tree', {'degree': 1, 'depth': 3}),
+            ('regular_tree', {'degree': 3, 'depth': 7}),
         )
         for key, parameters in invalid:
             with self.subTest(graph=key, parameters=parameters):
