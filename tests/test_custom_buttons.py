@@ -11,10 +11,10 @@ from unittest.mock import patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import networkx as nx
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QPointF, QTimer
 
 from graph_builder_custom import normalize_graph, public_graph
-from graph_builder_lib import (button, discover_buttons, main, empty_graph, EdgeRef,
+from graph_builder_lib import (button, discover_buttons, main, edit_graph, empty_graph, EdgeRef,
                                EditorContext, SelectionState, execute_action,
                                _edge_curve_points, _set_edge_curve_points,
                                write_graph_file, convert_from_file)
@@ -51,6 +51,42 @@ class CustomButtonTests(unittest.TestCase):
                 self.assertIn(color_graph.__graph_button__, launch.call_args.kwargs['actions'])
             finally:
                 del globals()['_test_button']
+
+    def test_edit_graph_returns_an_independent_graph(self):
+        original = nx.Graph()
+        original.add_edge('a', 'b')
+        original.graph['show_labels'] = False
+        app = QApplication.instance() or QApplication([])
+
+        def finish():
+            window = next(widget for widget in app.topLevelWidgets()
+                          if isinstance(widget, GraphBuilderQt) and widget.isVisible())
+            window.add_node(QPointF(50, 50))
+            window.close()
+
+        QTimer.singleShot(0, finish)
+        with patch('graph_builder_qt.QMessageBox.question', side_effect=AssertionError('Unexpected save prompt')):
+            result = edit_graph(original, actions=[])
+        self.assertIs(type(result), nx.Graph)
+        self.assertEqual(len(result), 3)
+        self.assertEqual(set(original), {'a', 'b'})
+        self.assertFalse(result.graph['show_labels'])
+        self.assertEqual(result.nodes['a']['label'], 'a')
+
+    def test_edit_graph_handles_empty_and_directed_inputs(self):
+        app = QApplication.instance() or QApplication([])
+
+        def finish():
+            window = next(widget for widget in app.topLevelWidgets()
+                          if isinstance(widget, GraphBuilderQt) and widget.isVisible())
+            window.close()
+
+        for source, kind in ((None, nx.Graph), (nx.DiGraph([(0, 1)]), nx.DiGraph)):
+            QTimer.singleShot(0, finish)
+            result = edit_graph(source, actions=[])
+            self.assertIs(type(result), kind)
+        with self.assertRaisesRegex(TypeError, 'NetworkX Graph'):
+            edit_graph('not a graph', actions=[])
 
     def test_ordinary_graph_in_place_mutation_and_missing_attributes(self):
         original = copy.deepcopy(self.context.graph)
@@ -196,6 +232,27 @@ class CustomButtonQtTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_custom_docstring_appears_in_button_tooltip(self):
+        @button('Explain', shortcut='G')
+        def explain(graph):
+            """Add an explanation to the tooltip.
+
+            Further documentation stays in the source file.
+            """
+            return graph
+
+        window = GraphBuilderQt(actions=(explain.__graph_button__,))
+        try:
+            action = next(action for definition, action in window.extension_actions
+                          if definition.id == explain.__graph_button__.id)
+            self.assertIn('Explain', action.toolTip())
+            self.assertIn('Add an explanation to the tooltip.', action.toolTip())
+            self.assertNotIn('Further documentation', action.toolTip())
+        finally:
+            window.scene.selectionChanged.disconnect(window.selection_changed)
+            window.deleteLater()
+            self.app.processEvents()
 
     def test_custom_button_undo_redo_and_uncaught_error(self):
         @button('Add leaf', selection='vertex')

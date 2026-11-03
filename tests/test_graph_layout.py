@@ -1,6 +1,7 @@
 """Automatic layout scope, anchors, and position calculations."""
 import tempfile
 import unittest
+from math import isfinite
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,6 +22,19 @@ def path_graph():
 
 
 class GraphLayoutTests(unittest.TestCase):
+    def test_full_arrange_is_centered_and_fits_requested_view(self):
+        graph = empty_graph()
+        for index in range(100):
+            graph.add_node(str(index), position=(0, 0), col=0)
+        positions = arrange_positions(graph, set(graph), center=(400, -250),
+                                      fit_size=(700, 500))
+        xs = [point[0] for point in positions.values()]
+        ys = [point[1] for point in positions.values()]
+        self.assertLessEqual(max(xs) - min(xs), 700.01)
+        self.assertLessEqual(max(ys) - min(ys), 500.01)
+        self.assertAlmostEqual(sum(xs) / len(xs), 400)
+        self.assertAlmostEqual(sum(ys) / len(ys), -250)
+
     def test_selection_and_pins_determine_movable_nodes(self):
         graph = path_graph()
         graph.nodes['b'][PIN_ATTRIBUTE] = True
@@ -37,6 +51,16 @@ class GraphLayoutTests(unittest.TestCase):
         self.assertEqual({node: graph.nodes[node]['position'] for node in graph}, original)
         self.assertTrue(all(all(isinstance(value, float) for value in point)
                             for point in positions.values()))
+
+    def test_layout_works_without_optional_numpy(self):
+        graph = path_graph()
+        before = {node: graph.nodes[node]['position'] for node in graph}
+        with patch('graph_layout.nx.spring_layout', side_effect=ImportError('no NumPy')):
+            positions = arrange_positions(graph, {'b', 'c'}, iterations=20)
+        self.assertEqual(set(positions), {'b', 'c'})
+        self.assertTrue(all(isfinite(value) for point in positions.values() for value in point))
+        self.assertTrue(any(positions[node] != before[node] for node in positions))
+        self.assertEqual({node: graph.nodes[node]['position'] for node in graph}, before)
 
     def test_pin_survives_graphml_round_trip(self):
         graph = path_graph()

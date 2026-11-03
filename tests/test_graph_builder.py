@@ -10,10 +10,11 @@ from graph_builder import randomize, switch, twin
 from graph_builder_custom import public_graph
 from graph_info import analyze
 from graph_builder_lib import (
-    _edge_curve_points, _set_edge_curve_points, convert_from_file,
-    complement, contract, copy_graph_selection, empty_graph,
+    _edge_curve_points, _set_edge_curve_points, axis_alignment_offset,
+    axis_alignment_plan, convert_from_file,
+    complement, contract, copy_graph_selection, empty_graph, fuse,
     flip_horizontal, flip_vertical, paste_graph_selection, pendant, rotate,
-    scale_selection, set_edge_label,
+    scale_selection, set_directed, set_edge_label,
     nearest_grid_point, radial_grid_divisions, radial_grid_new_spokes,
     triangular_grid_lines,
     triangular_grid_point, vertex_label, write_graph_file,
@@ -22,6 +23,77 @@ from tikz_export import graph_to_tikz, write_tikz
 
 
 class GraphTests(unittest.TestCase):
+    def test_axis_alignment_uses_screen_distance_and_decays_with_separation(self):
+        self.assertEqual(axis_alignment_offset([(408, 106)], [(68, 100)]), (0.0, -6))
+        self.assertEqual(axis_alignment_offset([(408, 110)], [(68, 100)]), (0.0, 0.0))
+        self.assertEqual(axis_alignment_offset([(408, 102)], [(-4592, 100)]), (0.0, 0.0))
+        self.assertEqual(axis_alignment_offset([(204, 53)], [(34, 50)], 2), (0.0, -3))
+
+    def test_axis_alignment_can_use_different_references_for_each_coordinate(self):
+        self.assertEqual(axis_alignment_offset([(105, 105)], [(100, 300), (300, 100)]),
+                         (-5, -5))
+
+    def test_axis_alignment_plan_includes_guides_and_axis_targets(self):
+        offset, guides = axis_alignment_plan([(300, 106)], [(200, 100)])
+        self.assertEqual(offset, (0.0, -6))
+        self.assertEqual(guides, (((200, 100), (300, 100)),))
+        offset, guides = axis_alignment_plan([(6, 7)], [],
+                                             axis_visible=(True, True),
+                                             origin_visible=True)
+        self.assertEqual(offset, (-6, -7))
+        self.assertEqual(guides, (((0.0, 0.0), (0.0, 7)),
+                                  ((0.0, 0.0), (6, 0.0))))
+        self.assertEqual(axis_alignment_plan([(200, 5)], [],
+                                             axis_visible=(False, True))[0],
+                         (0.0, -5))
+        self.assertEqual(axis_alignment_plan([(6, 7)], [])[0], (0.0, 0.0))
+
+    def test_axis_alignment_plan_can_report_guide_sources(self):
+        offsets, guides, matches = axis_alignment_plan(
+            [(300, 106)], [(200, 100)], include_matches=True)
+        self.assertEqual(offsets, (0.0, -6))
+        self.assertEqual(guides, (((200, 100), (300, 100)),))
+        self.assertEqual(matches, ((0, 0),))
+        _, _, virtual_matches = axis_alignment_plan(
+            [(6, 7)], [], axis_visible=(True, True),
+            origin_visible=True, include_matches=True)
+        self.assertEqual(virtual_matches, ((0, None), (0, None)))
+
+    def test_directed_pair_keeps_lower_id_arc_when_made_undirected(self):
+        graph = empty_graph(graph_type='digraph')
+        graph.add_node('a', position=(0, 0), col=0)
+        graph.add_node('b', position=(100, 0), col=0)
+        graph.add_edge('b', 'a', label='newer', col=2, style_overrides='{"width": 8}')
+        graph.add_edge('a', 'b', label='older', col=1, style_overrides='{"width": 3}')
+        _set_edge_curve_points(graph, 'a', 'b', [(30, 25), (70, 20)])
+        set_directed(graph, False)
+        self.assertEqual(graph.graph['graph_type'], 'graph')
+        for source, target in (('a', 'b'), ('b', 'a')):
+            self.assertEqual(graph.edges[source, target]['label'], 'older')
+            self.assertEqual(graph.edges[source, target]['col'], 1)
+            self.assertEqual(graph.edges[source, target]['style_overrides'], '{"width": 3}')
+        self.assertEqual(_edge_curve_points(graph, 'a', 'b'), [(30, 25), (70, 20)])
+        self.assertEqual(_edge_curve_points(graph, 'b', 'a'), [(70, 20), (30, 25)])
+
+    def test_single_directed_arc_survives_undirected_conversion(self):
+        graph = empty_graph(graph_type='digraph')
+        graph.add_node('a', position=(0, 0))
+        graph.add_node('b', position=(100, 0))
+        graph.add_edge('b', 'a', label='only arc', col=1)
+        set_directed(graph, False)
+        self.assertEqual(graph.edges['a', 'b']['label'], 'only arc')
+        self.assertEqual(graph.edges['b', 'a']['label'], 'only arc')
+
+    def test_directed_conversion_orders_numeric_internal_ids_numerically(self):
+        graph = empty_graph(graph_type='digraph')
+        graph.add_node('2', position=(0, 0))
+        graph.add_node('10', position=(100, 0))
+        graph.add_edge('10', '2', label='reverse')
+        graph.add_edge('2', '10', label='forward')
+        set_directed(graph, False)
+        self.assertEqual(graph.edges['2', '10']['label'], 'forward')
+        self.assertEqual(graph.edges['10', '2']['label'], 'forward')
+
     def test_pendant_grows_outward_and_repeated_uses_extend_a_tree(self):
         graph = empty_graph()
         graph.add_node('0', position=(0, 0), col=0)
@@ -172,6 +244,66 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(contracted.number_of_nodes(), 4)
         self.assertTrue(any(line.startswith('Degree min / avg / max:')
                             for line in analyze(public_graph(contracted), 'Overview')))
+
+    def test_twins_share_one_offset_and_keep_original_neighbors(self):
+        graph = empty_graph()
+        for node, position in [('0', (0, 0)), ('1', (50, 0)), ('2', (100, 0))]:
+            graph.add_node(node, position=position, col=1)
+        graph.add_edges_from([('0', '1'), ('1', '0'), ('1', '2'), ('2', '1')])
+        _, added = twin(graph, {'0', '1'}, return_new_vertices=True)
+        self.assertEqual(added, {'3', '4'})
+        self.assertEqual(graph.nodes['3']['position'], (20, 20))
+        self.assertEqual(graph.nodes['4']['position'], (70, 20))
+        self.assertTrue(graph.has_edge('3', '1') and graph.has_edge('1', '3'))
+        self.assertTrue(graph.has_edge('4', '0') and graph.has_edge('0', '4'))
+        self.assertFalse(graph.has_edge('3', '4'))
+
+    def test_fuse_only_nearby_groups_and_retains_representative_properties(self):
+        graph = empty_graph()
+        for node, position in [('0', (0, 0)), ('1', (3, 4)),
+                               ('2', (50, 0)), ('3', (51, 0)), ('4', (100, 0))]:
+            graph.add_node(node, position=position, col=int(node), label=f'V{node}')
+        graph.nodes['0']['style_overrides'] = '{"size": 42}'
+        graph.add_edge('0', '4', col=1)
+        graph.add_edge('4', '0', col=1)
+        result, added = fuse(graph, {'0', '1', '2', '3', '4'})
+        self.assertEqual(added, {'5', '6'})
+        self.assertEqual(set(result), {'4', '5', '6'})
+        self.assertEqual(result.nodes['5']['label'], 'V0')
+        self.assertEqual(result.nodes['5']['style_overrides'], '{"size": 42}')
+        self.assertEqual(result.nodes['5']['position'], (1.5, 2.0))
+        self.assertTrue(result.has_edge('5', '4'))
+
+    def test_single_vertex_fuse_includes_unselected_nearby_vertices(self):
+        graph = empty_graph()
+        for node, position in [('0', (0, 0)), ('1', (2, 0)), ('2', (20, 0))]:
+            graph.add_node(node, position=position, col=int(node))
+        result, added = fuse(graph, {'1'})
+        self.assertEqual(added, {'3'})
+        self.assertEqual(set(result), {'2', '3'})
+        self.assertEqual(result.nodes['3']['col'], 1)
+        self.assertEqual(result.nodes['3']['position'], (1.0, 0.0))
+
+    def test_fuse_without_selection_scans_whole_graph_at_ten_unit_tolerance(self):
+        graph = empty_graph()
+        for node, position in [('0', (0, 0)), ('1', (9, 0)),
+                               ('2', (30, 0)), ('3', (41, 0))]:
+            graph.add_node(node, position=position, col=0)
+        result, added = fuse(graph, set())
+        self.assertEqual(added, {'4'})
+        self.assertEqual(set(result), {'2', '3', '4'})
+        self.assertEqual(result.nodes['4']['position'], (4.5, 0.0))
+
+    def test_fuse_does_not_chain_vertices_beyond_tolerance(self):
+        graph = empty_graph()
+        for node, position in [('0', (0, 0)), ('1', (-9, 0)), ('2', (9, 0))]:
+            graph.add_node(node, position=position, col=0)
+        result, added = fuse(graph, set())
+        self.assertEqual(len(added), 1)
+        self.assertEqual(len(result), 2)
+        result, added = fuse(graph, {'0'})
+        self.assertEqual(len(added), 1)
+        self.assertEqual(len(result), 2)
 
     def test_transform_selection_moves_only_selected_vertices_and_internal_curves(self):
         graph = empty_graph(graph_type='graph')

@@ -1,18 +1,17 @@
 """Compact Qt editors for inherited graph appearance."""
 from __future__ import annotations
 
-import json
 from copy import deepcopy
 
 from PySide6.QtCore import Qt, QRectF, QSignalBlocker
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (QColorDialog, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QSpinBox, QToolButton, QVBoxLayout, QWidget, QInputDialog)
+    QPushButton, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
-from graph_styles import (FIELDS, effective_style, palette_styles, presets,
-                          contrast_text_color, remove_preset, set_overrides,
-                          set_palette_style, set_preset)
+from graph_styles import (FIELDS, effective_style,
+                          contrast_text_color, reset_palette_style,
+                          set_overrides, set_palette_style)
 
 
 SPECS = {
@@ -90,14 +89,17 @@ class StylePreview(QWidget):
 class PropertiesDialog(QDialog):
     advanced_open = False
 
-    def __init__(self, graph, kind, attributes, *, bulk=False, style_only=False, parent=None):
+    def __init__(self, graph, kind, attributes, *, bulk=False, style_only=False,
+                 parent=None):
         super().__init__(parent)
-        self.graph, self.kind = graph, kind
+        self.source_graph, self.graph, self.kind = graph, deepcopy(graph), kind
         self.attributes = list(attributes)
         self.bulk, self.style_only = bulk, style_only
         self.type_delta = 0
         self.look_mode = None
         self._look_touched = False
+        self.shared_style_update = None
+        self._applying_to_type = False
         self.setWindowTitle(f'{"Vertex" if kind == "vertex" else "Edge"} properties')
         self.setMinimumWidth(390)
         layout = QVBoxLayout(self)
@@ -115,8 +117,9 @@ class PropertiesDialog(QDialog):
             type_row.addWidget(self.type_label, 1)
             step = QWidget()
             step.setObjectName('type_step')
+            step.setFixedSize(62, 31)
             step.setStyleSheet('QWidget#type_step { border: 1px solid #b8bec4; border-radius: 5px; } '
-                               'QToolButton { border: none; color: #111111; font-size: 17px; }')
+                               'QToolButton { border: none; font-size: 17px; }')
             step_layout = QHBoxLayout(step)
             step_layout.setContentsMargins(2, 1, 2, 1)
             step_layout.setSpacing(0)
@@ -129,14 +132,14 @@ class PropertiesDialog(QDialog):
             type_row.addWidget(step)
             layout.addLayout(type_row)
             self._update_type_label()
-        self.preset_choice = None
-        toggle = QToolButton()
-        toggle.setText('Advanced ▾')
+        toggle = QPushButton('Style ▾', self)
+        self.advanced_toggle = toggle
         toggle.setCheckable(True)
         toggle.setChecked(style_only or PropertiesDialog.advanced_open)
+        layout.addWidget(toggle, 0, Qt.AlignLeft)
         toggle.setVisible(not style_only)
-        layout.addWidget(toggle)
-        advanced_widget = QWidget()
+        advanced_widget = QWidget(self)
+        advanced_widget.setObjectName('style_advanced_panel')
         advanced_layout = QVBoxLayout(advanced_widget)
         advanced_layout.setContentsMargins(0, 0, 0, 0)
         if not style_only:
@@ -145,30 +148,21 @@ class PropertiesDialog(QDialog):
                 self.look_mode.addItem('Keep existing looks', 'keep')
             self.look_mode.addItem(self._inherit_text(), 'inherit')
             self.look_mode.addItem('Custom look', 'custom')
-            if presets(graph, kind):
-                self.look_mode.addItem('Named preset', 'preset')
             if not bulk:
                 first = self.attributes[0]
-                mode = ('preset' if first.get('style_preset') else
-                        'custom' if first.get('style_overrides') else 'inherit')
+                mode = ('custom' if first.get('style_overrides') or first.get('style_preset')
+                        else 'inherit')
                 self.look_mode.setCurrentIndex(self.look_mode.findData(mode))
             advanced_layout.addWidget(self.look_mode)
-            self.preset_choice = QComboBox()
-            for identifier, data in presets(graph, kind).items():
-                self.preset_choice.addItem(data.get('name', identifier), identifier)
-            current_preset = self.attributes[0].get('style_preset')
-            if current_preset:
-                self.preset_choice.setCurrentIndex(max(0, self.preset_choice.findData(current_preset)))
-            advanced_layout.addWidget(self.preset_choice)
-            self.preset_choice.setVisible(self.preset_choice.count() > 0)
+            self.apply_type_button = QPushButton('Apply look to whole type')
+            self.apply_type_button.clicked.connect(self.apply_look_to_type)
+            advanced_layout.addWidget(self.apply_type_button, 0, Qt.AlignLeft)
         self.preview = StylePreview(self)
         advanced_layout.addWidget(self.preview)
-        if self.label_edit is not None:
-            self.label_edit.textChanged.connect(self.preview.update)
-        if self.preset_choice is not None:
-            self.preset_choice.currentIndexChanged.connect(self.preview.update)
         self.controls = {}
         self.edit_widgets = []
+        if self.label_edit is not None:
+            self.label_edit.textChanged.connect(self.preview.update)
         fields = QFormLayout()
         for field in FIELDS[kind]:
             title, spec = SPECS[kind][field]
@@ -211,11 +205,10 @@ class PropertiesDialog(QDialog):
             self.edit_widgets.append(value)
             fields.addRow(title, row)
         advanced_layout.addLayout(fields)
-        advanced_widget.setVisible(style_only or PropertiesDialog.advanced_open)
-        toggle.toggled.connect(advanced_widget.setVisible)
-        if not style_only:
-            toggle.toggled.connect(lambda checked: setattr(PropertiesDialog, 'advanced_open', checked))
+        toggle.toggled.connect(self._toggle_advanced)
+        self.advanced_widget = advanced_widget
         layout.addWidget(advanced_widget)
+        advanced_widget.setVisible(style_only or PropertiesDialog.advanced_open)
         note = QLabel('Canvas preview is approximate. Extra TikZ options are exported verbatim and may fail to compile.')
         note.setWordWrap(True)
         advanced_layout.addWidget(note)
@@ -223,8 +216,6 @@ class PropertiesDialog(QDialog):
             self.look_mode.currentIndexChanged.connect(self._sync_look)
             self._sync_look()
             self.look_mode.currentIndexChanged.connect(self._mark_look_touched)
-            self.preset_choice.currentIndexChanged.connect(self._refresh_readonly_controls)
-            self.preset_choice.currentIndexChanged.connect(self._mark_look_touched)
             for widget in self.controls.values():
                 if isinstance(widget, QLineEdit):
                     widget.textChanged.connect(self._mark_look_touched)
@@ -236,6 +227,12 @@ class PropertiesDialog(QDialog):
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _toggle_advanced(self, open_advanced):
+        self.advanced_widget.setVisible(open_advanced)
+        PropertiesDialog.advanced_open = open_advanced
+        self.layout().activate()
+        self.resize(self.width(), self.sizeHint().height())
 
     def _inherit_text(self):
         indices = {int(item.get('col', 0)) for item in self.attributes}
@@ -259,6 +256,7 @@ class PropertiesDialog(QDialog):
             self.look_mode.setItemText(index, self._inherit_text())
 
     def change_type(self, delta):
+        self._clear_pending_type_style()
         self.type_delta += delta
         self._update_type_label()
         self._refresh_readonly_controls()
@@ -266,9 +264,11 @@ class PropertiesDialog(QDialog):
 
     def _sync_look(self):
         mode = self.look_mode.currentData()
+        if mode != 'inherit' and not self._applying_to_type:
+            self._clear_pending_type_style()
         for widget in self.edit_widgets:
             widget.setEnabled(mode == 'custom')
-        self.preset_choice.setEnabled(mode == 'preset')
+        self.apply_type_button.setEnabled(mode == 'custom' and len(set(self.type_values())) == 1)
         self._refresh_readonly_controls()
         self.preview.update()
 
@@ -277,15 +277,12 @@ class PropertiesDialog(QDialog):
         self.preview.update()
 
     def _refresh_readonly_controls(self):
-        if self.look_mode is None or self.look_mode.currentData() not in ('inherit', 'preset'):
+        if self.look_mode is None or self.look_mode.currentData() != 'inherit':
             return
         attributes = deepcopy(self.attributes[0])
         attributes['col'] = self.type_values()[0]
         attributes.pop('style_overrides', None)
-        if self.look_mode.currentData() == 'inherit':
-            attributes.pop('style_preset', None)
-        else:
-            attributes['style_preset'] = self.preset_choice.currentData()
+        attributes.pop('style_preset', None)
         style = effective_style(self.graph, self.kind, attributes)
         for field, widget in self.controls.items():
             blocker = QSignalBlocker(widget)
@@ -309,27 +306,48 @@ class PropertiesDialog(QDialog):
         mode = self.look_mode.currentData() if self.look_mode is not None else 'custom'
         if mode == 'keep':
             return {}
-        if mode in ('inherit', 'preset'):
+        if mode == 'inherit':
             return {field: None for field in FIELDS[self.kind]}
+        return self._control_values()
+
+    def clear_preset(self):
+        if self.look_mode is None or not self._look_touched or self.look_mode.currentData() == 'keep':
+            return False
+        return True
+
+    def _clear_pending_type_style(self):
+        if self.shared_style_update is not None:
+            self.shared_style_update = None
+            self.graph = deepcopy(self.source_graph)
+
+    def apply_look_to_type(self):
+        if self.look_mode.currentData() != 'custom' or len(set(self.type_values())) != 1:
+            return
+        values = self.changes()
+        if not values:
+            values = self._control_values()
+        if not self._valid_colors(values):
+            return
+        index = self.type_values()[0]
+        self.shared_style_update = (index, values)
+        set_palette_style(self.graph, self.kind, index, values)
+        self._applying_to_type = True
+        self.look_mode.setCurrentIndex(self.look_mode.findData('inherit'))
+        self._applying_to_type = False
+        self._look_touched = True
+        self.preview.update()
+
+    def _control_values(self):
         return {field: (widget.currentData() if isinstance(widget, QComboBox) else
                         widget.value() if isinstance(widget, QDoubleSpinBox) else widget.text().strip())
                 for field, widget in self.controls.items()}
-
-    def preset_change(self):
-        if self.look_mode is None or not self._look_touched or self.look_mode.currentData() == 'keep':
-            return None
-        return self.preset_choice.currentData() if self.look_mode.currentData() == 'preset' else ''
 
     def preview_style(self):
         attributes = deepcopy(self.attributes[0])
         if not self.style_only:
             attributes['col'] = self.type_values()[0]
-        identifier = self.preset_change()
-        if identifier is not None:
-            if identifier:
-                attributes['style_preset'] = identifier
-            else:
-                attributes.pop('style_preset', None)
+        if self.clear_preset():
+            attributes.pop('style_preset', None)
         set_overrides(attributes, self.changes())
         return effective_style(self.graph, self.kind, attributes)
 
@@ -337,22 +355,26 @@ class PropertiesDialog(QDialog):
         if self.look_mode is not None and self.look_mode.currentData() != 'custom':
             self.accept()
             return
+        if self._valid_colors(self.changes()):
+            self.accept()
+
+    def _valid_colors(self, changes):
         for field in ('fill', 'outline', 'text', 'stroke'):
-            value = self.changes().get(field)
+            value = changes.get(field)
             special = (value == 'auto' and field == 'text') or (value == 'none' and field == 'fill')
             if value is not None and not special and not (isinstance(value, str) and
                     len(value) == 7 and value.startswith('#') and QColor(value).isValid()):
                 QMessageBox.warning(self, 'Invalid color', f'{field}: enter a #RRGGBB color or the offered special value.')
-                return
-        self.accept()
+                return False
+        return True
 
 
 class StylesDialog(QDialog):
-    """Edit palette slots and named presets on an isolated graph copy."""
+    """Browse and edit shared type styles in a single movable dialog."""
     def __init__(self, graph, parent=None):
         super().__init__(parent)
         self.graph = deepcopy(graph)
-        self.setWindowTitle('Shared styles')
+        self.setWindowTitle('Type styles')
         layout = QVBoxLayout(self)
         self.kind = QComboBox()
         self.kind.addItems(('vertex', 'edge'))
@@ -362,92 +384,93 @@ class StylesDialog(QDialog):
         self.slot = QSpinBox()
         self.slot.setMinimum(0)
         slot_row.addWidget(self.slot)
-        edit_slot = QPushButton('Edit type style')
-        edit_slot.clicked.connect(self.edit_palette)
-        slot_row.addWidget(edit_slot)
+        self.reset_button = QPushButton('Reset this type')
+        self.reset_button.setToolTip('Restore the built-in style for this type. Individual custom looks stay unchanged.')
+        self.reset_button.clicked.connect(self._reset_current_type)
+        slot_row.addWidget(self.reset_button)
         layout.addLayout(slot_row)
-        self.preset = QComboBox()
-        layout.addWidget(self.preset)
-        self.kind.currentIndexChanged.connect(self.refresh)
-        preset_row = QHBoxLayout()
-        for title, action in (('New preset', self.new_preset), ('Edit', self.edit_preset),
-                              ('Rename', self.rename_preset), ('Delete', self.delete_preset)):
-            button = QPushButton(title)
-            button.clicked.connect(action)
-            preset_row.addWidget(button)
-        layout.addLayout(preset_row)
+        self._current_kind = self.kind.currentText()
+        self._current_index = 0
+        self.refresh()
+        self.editor = self._create_editor()
+        layout.addWidget(self.editor)
+        self._initial_values = self.editor._control_values()
+        self.kind.currentIndexChanged.connect(self._switch_kind)
+        self.slot.valueChanged.connect(self._switch_type)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-        self.refresh()
 
     def refresh(self):
-        self.slot.setMaximum(max(0, int(self.graph.graph.get(
-            'num_vertex_colors' if self.kind.currentText() == 'vertex' else 'num_edge_colors', 1)) - 1))
-        self.preset.clear()
-        for identifier, data in presets(self.graph, self.kind.currentText()).items():
-            self.preset.addItem(data.get('name', identifier), identifier)
+        count = self.graph.graph.get(
+            'num_vertex_colors' if self.kind.currentText() == 'vertex' else 'num_edge_colors', 1)
+        with QSignalBlocker(self.slot):
+            self.slot.setMaximum(max(0, int(count) - 1))
 
-    def _edit_style(self, initial, color_index=0):
-        attributes = {'col': color_index, 'style_overrides': json.dumps(initial)}
-        dialog = PropertiesDialog(self.graph, self.kind.currentText(), [attributes],
-                                  style_only=True, parent=self)
-        if dialog.exec() != QDialog.Accepted:
-            return None
-        result = dict(initial)
-        for field, value in dialog.changes().items():
-            if value is None:
-                result.pop(field, None)
-            else:
-                result[field] = value
-        return result
+    def _create_editor(self):
+        editor = PropertiesDialog(self.graph, self._current_kind,
+                                  [{'col': self._current_index}], style_only=True, parent=self)
+        editor.setWindowFlags(Qt.Widget)
+        editor.setMinimumWidth(0)
+        editor.layout().setContentsMargins(0, 0, 0, 0)
+        editor.findChild(QDialogButtonBox).hide()
+        return editor
 
-    def edit_palette(self):
-        kind, index = self.kind.currentText(), self.slot.value()
-        result = self._edit_style(palette_styles(self.graph, kind).get(str(index), {}), index)
-        if result is not None:
-            set_palette_style(self.graph, kind, index, result)
+    def _save_current_type(self):
+        values = self.editor._control_values()
+        if values == self._initial_values:
+            return True
+        if not self.editor._valid_colors(values):
+            return False
+        set_palette_style(self.graph, self._current_kind, self._current_index, values)
+        return True
 
-    def new_preset(self):
-        name, accepted = QInputDialog.getText(self, 'New preset', 'Name:')
-        if not accepted or not name.strip():
+    def _reset_current_type(self):
+        # Discard any unfinished edits in this slot, but keep edits to other
+        # slots in the dialog. Cancel still discards all of them.
+        self._initial_values = self.editor._control_values()
+        reset_palette_style(self.graph, self._current_kind, self._current_index)
+        self._switch_type(self._current_index)
+
+    def _switch_type(self, index):
+        if not self._save_current_type():
+            with QSignalBlocker(self.slot):
+                self.slot.setValue(self._current_index)
             return
-        kind = self.kind.currentText()
-        identifier = 'preset0'
-        index = 0
-        while identifier in presets(self.graph, kind):
-            index += 1
-            identifier = f'preset{index}'
-        result = self._edit_style({})
-        if result is not None:
-            set_preset(self.graph, kind, identifier, name.strip(), result)
-            self.refresh()
-            self.preset.setCurrentIndex(self.preset.findData(identifier))
+        self._current_index = index
+        self.editor.graph = self.graph
+        self.editor.attributes = [{'col': index}]
+        style = effective_style(self.graph, self._current_kind, self.editor.attributes[0])
+        for field, widget in self.editor.controls.items():
+            with QSignalBlocker(widget):
+                value = style[field]
+                if isinstance(widget, QComboBox):
+                    widget.setCurrentIndex(max(0, widget.findData(value)))
+                elif isinstance(widget, QDoubleSpinBox):
+                    widget.setValue(float(value))
+                else:
+                    widget.setText(str(value))
+        self._initial_values = self.editor._control_values()
+        self.editor.preview.update()
 
-    def edit_preset(self):
-        identifier = self.preset.currentData()
-        if identifier is None:
+    def _switch_kind(self):
+        if not self._save_current_type():
+            with QSignalBlocker(self.kind):
+                self.kind.setCurrentText(self._current_kind)
             return
-        kind = self.kind.currentText()
-        data = presets(self.graph, kind)[identifier]
-        result = self._edit_style(data['style'])
-        if result is not None:
-            set_preset(self.graph, kind, identifier, data['name'], result)
+        self._current_kind = self.kind.currentText()
+        self.refresh()
+        self._current_index = self.slot.value()
+        previous = self.editor
+        self.editor = self._create_editor()
+        self.layout().replaceWidget(previous, self.editor)
+        previous.hide()
+        previous.deleteLater()
+        self._initial_values = self.editor._control_values()
+        self.layout().activate()
+        self.resize(max(self.width(), self.sizeHint().width()), self.sizeHint().height())
 
-    def rename_preset(self):
-        identifier = self.preset.currentData()
-        if identifier is None:
-            return
-        kind = self.kind.currentText()
-        data = presets(self.graph, kind)[identifier]
-        name, accepted = QInputDialog.getText(self, 'Rename preset', 'Name:', text=data['name'])
-        if accepted and name.strip():
-            set_preset(self.graph, kind, identifier, name.strip(), data['style'])
-            self.refresh()
-
-    def delete_preset(self):
-        identifier = self.preset.currentData()
-        if identifier is not None:
-            remove_preset(self.graph, self.kind.currentText(), identifier)
-            self.refresh()
+    def _accept(self):
+        if self._save_current_type():
+            self.accept()

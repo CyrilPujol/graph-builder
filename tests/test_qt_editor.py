@@ -7,10 +7,11 @@ from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
+from PySide6.QtGui import (QColor, QImage, QInputDevice, QNativeGestureEvent,
+                           QPainter, QPalette, QPointingDevice, QWheelEvent)
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QInputDialog, QToolButton
+from PySide6.QtWidgets import QApplication, QInputDialog, QLabel, QTabBar, QToolButton
 from graph_style_ui import PropertiesDialog
 
 import graph_builder
@@ -19,7 +20,7 @@ from graph_builder_lib import (
     builtin_editor_actions, colormap_1, convert_from_file, nearest_grid_point,
 )
 from graph_builder_qt import GraphBuilderQt, StepControl
-from graph_builder_qt_canvas import COORDINATE_UNIT, DEFAULT_GRID_PRECISION, EDGE_STROKE_WIDTH
+from graph_builder_qt_canvas import COORDINATE_UNIT, DEFAULT_GRID_PRECISION, EDGE_STROKE_WIDTH, SELECTION_COLOR
 from tikz_export import graph_to_tikz
 
 
@@ -97,21 +98,21 @@ class QtEditorTests(unittest.TestCase):
         self.window.add_node(QPointF(100, 0))
         self.window.toggle_edge('0', '1')
         canvas = self.window.view.viewport()
-        def accept_vertex(dialog):
-            dialog.label_edit.setText('vertex name')
-            return QDialog.Accepted
-        with patch.object(PropertiesDialog, 'exec', accept_vertex):
-            QTest.mouseClick(canvas, Qt.LeftButton, pos=self.position(0, 0))
-            QTest.mouseDClick(canvas, Qt.LeftButton, pos=self.position(0, 0))
-            QTest.mouseRelease(canvas, Qt.LeftButton, pos=self.position(0, 0))
+        QTest.mouseClick(canvas, Qt.LeftButton, pos=self.position(0, 0))
+        QTest.mouseDClick(canvas, Qt.LeftButton, pos=self.position(0, 0))
+        QTest.mouseRelease(canvas, Qt.LeftButton, pos=self.position(0, 0))
+        editor = self.window._active_style_dialog
+        self.assertIsInstance(editor, PropertiesDialog)
+        editor.label_edit.setText('vertex name')
+        editor._accept()
         self.assertEqual(self.window.graph.nodes['0']['label'], 'vertex name')
         QTest.mouseClick(canvas, Qt.LeftButton, pos=self.position(70, 0))
-        def accept_edge(dialog):
-            dialog.label_edit.setText('edge name')
-            return QDialog.Accepted
-        with patch.object(PropertiesDialog, 'exec', accept_edge):
-            QTest.mouseDClick(canvas, Qt.LeftButton, pos=self.position(70, 0))
-            QTest.mouseRelease(canvas, Qt.LeftButton, pos=self.position(70, 0))
+        QTest.mouseDClick(canvas, Qt.LeftButton, pos=self.position(70, 0))
+        QTest.mouseRelease(canvas, Qt.LeftButton, pos=self.position(70, 0))
+        editor = self.window._active_style_dialog
+        self.assertIsInstance(editor, PropertiesDialog)
+        editor.label_edit.setText('edge name')
+        editor._accept()
         self.assertEqual(self.window.graph.edges['0', '1']['label'], 'edge name')
 
     def test_second_click_drag_on_edge_adds_curve_point_without_renaming(self):
@@ -122,11 +123,10 @@ class QtEditorTests(unittest.TestCase):
         start = self.position(50, 0)
         end = self.position(50, 35)
         QTest.mouseClick(canvas, Qt.LeftButton, pos=start)
-        with patch.object(PropertiesDialog, 'exec') as properties_dialog:
-            QTest.mouseDClick(canvas, Qt.LeftButton, pos=start)
-            QTest.mouseMove(canvas, pos=end)
-            QTest.mouseRelease(canvas, Qt.LeftButton, pos=end)
-            properties_dialog.assert_not_called()
+        QTest.mouseDClick(canvas, Qt.LeftButton, pos=start)
+        QTest.mouseMove(canvas, pos=end)
+        QTest.mouseRelease(canvas, Qt.LeftButton, pos=end)
+        self.assertIsNone(self.window._active_style_dialog)
         self.assertEqual(len(_edge_curve_points(self.window.graph, '0', '1')), 1)
 
     def test_second_click_drag_on_vertex_moves_without_renaming(self):
@@ -135,11 +135,10 @@ class QtEditorTests(unittest.TestCase):
         start = self.position(0, 0)
         end = self.position(0, 60)
         QTest.mouseClick(canvas, Qt.LeftButton, pos=start)
-        with patch.object(PropertiesDialog, 'exec') as properties_dialog:
-            QTest.mouseDClick(canvas, Qt.LeftButton, pos=start)
-            QTest.mouseMove(canvas, pos=end)
-            QTest.mouseRelease(canvas, Qt.LeftButton, pos=end)
-            properties_dialog.assert_not_called()
+        QTest.mouseDClick(canvas, Qt.LeftButton, pos=start)
+        QTest.mouseMove(canvas, pos=end)
+        QTest.mouseRelease(canvas, Qt.LeftButton, pos=end)
+        self.assertIsNone(self.window._active_style_dialog)
         self.assertGreater(self.window.graph.nodes['0']['position'][1], 0)
 
     def test_shift_selection_and_group_edge_gesture(self):
@@ -169,7 +168,20 @@ class QtEditorTests(unittest.TestCase):
                            pos=self.position(100, 0))
         self.assertTrue(self.window.graph.has_edge('0', '1'))
 
-    def test_secondary_click_deletes_only_without_a_selection(self):
+    def test_edge_drag_marks_target_vertex_only_while_hovered(self):
+        self.window.add_node(QPointF(0, 0))
+        self.window.add_node(QPointF(120, 0))
+        canvas = self.window.view.viewport()
+        QTest.mousePress(canvas, Qt.RightButton, pos=self.position(0, 0))
+        QTest.mouseMove(canvas, pos=self.position(60, 0))
+        self.assertIsNone(self.window.scene.edge_hover_target)
+        QTest.mouseMove(canvas, pos=self.position(120, 0))
+        self.assertEqual(self.window.scene.edge_hover_target, '1')
+        QTest.mouseRelease(canvas, Qt.RightButton, pos=self.position(120, 0))
+        self.assertIsNone(self.window.scene.edge_hover_target)
+        self.assertTrue(self.window.graph.has_edge('0', '1'))
+
+    def test_secondary_click_deletes_vertex_even_with_a_selection(self):
         self.window.add_node(QPointF(0, 0))
         canvas = self.window.view.viewport()
         QTest.mouseClick(canvas, Qt.RightButton, pos=self.position(0, 0))
@@ -179,8 +191,8 @@ class QtEditorTests(unittest.TestCase):
         self.window.add_node(QPointF(100, 0))
         QTest.mouseClick(canvas, Qt.LeftButton, pos=self.position(0, 0))
         QTest.mouseClick(canvas, Qt.RightButton, pos=self.position(100, 0))
-        self.assertEqual(self.window.graph.number_of_nodes(), 2)
-        self.assertEqual(self.window.selection.nodes, {'1'})
+        self.assertEqual(self.window.graph.number_of_nodes(), 1)
+        self.assertEqual(self.window.selection.nodes, {'0'})
 
     def test_empty_click_deselects_without_creating_when_selected(self):
         self.window.add_node(QPointF(0, 0))
@@ -254,15 +266,20 @@ class QtEditorTests(unittest.TestCase):
 
     def test_grid_precision_buttons_and_grid_order(self):
         grid_actions = self.window.menu_tabs.widget(3).actions()
-        self.assertEqual([action.text() for action in grid_actions[:4]],
-                         ['No grid', 'Square grid', 'Radial grid', 'Triangular grid'])
+        self.assertEqual([action.text() for action in grid_actions[:7]],
+                         ['No guides', 'Axes', 'Square grid', 'Radial grid',
+                          'Triangular grid', '', 'Auto-snap'])
+        self.assertTrue(grid_actions[5].isSeparator())
+        self.assertEqual(self.window.grid_mode, 'axis')
+        self.assertTrue(self.window.axis_auto_snap)
+        self.assertTrue(self.window.axis_snap_action.isChecked())
         self.window.set_grid('triangular')
         original = self.window.grid_unit
         self.window.grid_up_action.trigger()
         self.assertEqual(self.window.grid_unit, original / 2)
         self.window.grid_down_action.trigger()
         self.assertEqual(self.window.grid_unit, original)
-        self.assertEqual(self.window.grid_unit_label.text().strip(), 'Grid precision:')
+        self.assertEqual(self.window.grid_unit_label.text().strip(), 'Grid density:')
         for control in self.window.findChildren(StepControl):
             self.assertIn(control.decrease.text(), ('-', ' '))
             self.assertIn(control.increase.text(), ('+', ' '))
@@ -275,6 +292,117 @@ class QtEditorTests(unittest.TestCase):
         self.window.set_grid_unit(COORDINATE_UNIT * 16)
         self.assertTrue(self.window.grid_up_action.isEnabled())
         self.assertFalse(self.window.grid_down_action.isEnabled())
+
+    def test_axis_grid_is_indicative_until_auto_snap_is_enabled(self):
+        self.window.set_grid(None)
+        self.window.grid_axis_action.trigger()
+        self.assertEqual(self.window.grid_mode, 'axis')
+        self.assertTrue(self.window.axis_snap_action.isVisible())
+        self.window.set_axis_auto_snap(False)
+        self.assertFalse(self.window.axis_auto_snap)
+        self.assertFalse(self.window.grid_unit_label_action.isVisible())
+        self.assertFalse(self.window.grid_down_action.isEnabled())
+        self.window.add_node(QPointF(100, 100))
+        self.window.add_node(QPointF(160, 190))
+        self.assertEqual(self.window.graph.nodes['1']['position'], (160, 190))
+        self.window.node_items['1'].setSelected(True)
+        self.window.node_items['1'].setPos(160, 106)
+        self.window.finish_pointer_change()
+        self.assertEqual(self.window.graph.nodes['1']['position'], (160, 106))
+        self.window.axis_snap_action.trigger()
+        self.window.node_items['1'].setPos(160, 106)
+        self.window.finish_pointer_change()
+        self.assertEqual(self.window.graph.nodes['1']['position'], (160, 100))
+        self.window.node_items['1'].setPos(106, 170)
+        self.window.finish_pointer_change()
+        self.assertEqual(self.window.graph.nodes['1']['position'], (100, 170))
+        self.window.grid_axis_action.trigger()
+        self.assertIsNone(self.window.grid_mode)
+        self.assertFalse(self.window.axis_snap_action.isVisible())
+        self.assertFalse(self.window.grid_options_separator.isVisible())
+
+    def test_axis_snap_ignores_vertices_outside_view(self):
+        self.window.set_grid('axis')
+        self.window.set_axis_auto_snap(True)
+        self.window.add_node(QPointF(10000, 100))
+        self.window.add_node(QPointF(200, 200))
+        self.window.node_items['1'].setSelected(True)
+        self.window.node_items['1'].setPos(200, 105)
+        self.window.finish_pointer_change()
+        self.assertEqual(self.window.graph.nodes['1']['position'], (200, 105))
+
+    def test_axis_snap_moves_a_selected_group_together(self):
+        self.window.set_grid('axis')
+        self.window.set_axis_auto_snap(True)
+        self.window.add_node(QPointF(100, 100))
+        self.window.add_node(QPointF(160, 190))
+        self.window.add_node(QPointF(200, 230))
+        self.window.node_items['1'].setSelected(True)
+        self.window.node_items['2'].setSelected(True)
+        self.window.node_items['1'].setPos(160, 106)
+        self.window.node_items['2'].setPos(200, 146)
+        self.window.finish_pointer_change()
+        self.assertEqual(self.window.graph.nodes['1']['position'], (160, 100))
+        self.assertEqual(self.window.graph.nodes['2']['position'], (200, 140))
+        self.window.undo()
+        self.assertEqual(self.window.graph.nodes['1']['position'], (160, 190))
+
+    def test_axis_and_origin_snap_without_reference_vertices(self):
+        self.window.add_node(QPointF(150, 150))
+        self.window.node_items['0'].setSelected(True)
+        self.window.node_items['0'].setPos(6, 7)
+        self.window.finish_pointer_change()
+        self.assertEqual(self.window.graph.nodes['0']['position'], (0, 0))
+
+    def test_axis_snap_guide_is_visible_during_drag_and_cleared_on_release(self):
+        self.window.add_node(QPointF(100, 100))
+        self.window.add_node(QPointF(300, 160))
+        self.window.graph.add_edge('0', '1')
+        self.window.rebuild_scene()
+        canvas = self.window.view.viewport()
+        QTest.mousePress(canvas, Qt.LeftButton, pos=self.position(300, 160))
+        QTest.mouseMove(canvas, pos=self.position(300, 106))
+        self.assertIn(((100.0, 100.0), (300.0, 100.0)),
+                      self.window.scene.axis_snap_guides)
+        self.assertEqual(self.window.scene.axis_snap_guide_endpoints,
+                         (frozenset({'0', '1'}),))
+        QTest.mouseRelease(canvas, Qt.LeftButton, pos=self.position(300, 106))
+        self.assertEqual(self.window.scene.axis_snap_guides, ())
+        self.assertEqual(self.window.graph.nodes['1']['position'], (300, 100))
+
+    def test_foreground_guide_stays_above_edge_but_behind_vertices(self):
+        self.window.add_node(QPointF(50, 50))
+        self.window.add_node(QPointF(150, 50))
+        self.window.add_node(QPointF(100, 50))
+        self.window.toggle_edge('0', '1')
+
+        def render():
+            image = QImage(200, 100, QImage.Format_ARGB32_Premultiplied)
+            painter = QPainter(image)
+            self.window.scene.render(painter, QRectF(0, 0, 200, 100),
+                                     QRectF(0, 0, 200, 100))
+            painter.end()
+            return image
+
+        before = render()
+        self.window.scene.set_axis_snap_guides(
+            (((50, 50), (150, 50)),), ({'0', '1'},))
+        after = render()
+        self.assertEqual(before.pixelColor(50, 50), after.pixelColor(50, 50))
+        self.assertEqual(before.pixelColor(150, 50), after.pixelColor(150, 50))
+        self.assertNotEqual(before.pixelColor(75, 50), after.pixelColor(75, 50))
+        self.assertNotEqual(before.pixelColor(100, 50), after.pixelColor(100, 50))
+        self.assertEqual(after.pixelColor(100, 50).name(), SELECTION_COLOR.name())
+
+    def test_axis_snap_preview_masks_only_matched_vertex_ids(self):
+        self.window.add_node(QPointF(100, 100))
+        self.window.add_node(QPointF(200, 115))
+        self.window.add_node(QPointF(300, 106))
+        self.window.preview_axis_snap({'2': self.window.node_items['2']})
+        self.assertEqual(self.window.scene.axis_snap_guides,
+                         (((100.0, 100.0), (300.0, 100.0)),))
+        self.assertEqual(self.window.scene.axis_snap_guide_endpoints,
+                         (frozenset({'0', '2'}),))
 
     def test_standard_graph_form_remembers_parameters_and_validates(self):
         self.assertEqual(self.window.menu_tabs.tabText(7), 'Standard graphs')
@@ -408,10 +536,70 @@ class QtEditorTests(unittest.TestCase):
         self.assertAlmostEqual(center_after.x(), center_before.x(), delta=.05)
         self.assertAlmostEqual(center_after.y(), center_before.y(), delta=.05)
 
+    def test_trackpad_scroll_pans_both_axes_and_mouse_wheel_zooms(self):
+        view = self.window.view
+        center = view.viewport().rect().center()
+        before = view.mapToScene(center)
+        touchpad = QPointingDevice('test touchpad', 12345,
+                                   QInputDevice.DeviceType.TouchPad,
+                                   QPointingDevice.PointerType.Finger,
+                                   QInputDevice.Capability.Position |
+                                   QInputDevice.Capability.PixelScroll, 2, 0)
+
+        def wheel(pixels, angles, device=None):
+            event = QWheelEvent(QPointF(center), QPointF(view.mapToGlobal(center)),
+                                pixels, angles, Qt.NoButton, Qt.NoModifier,
+                                Qt.ScrollUpdate, False,
+                                device=device or QPointingDevice.primaryPointingDevice())
+            view.wheelEvent(event)
+
+        wheel(QPoint(45, 30), QPoint(0, 0), touchpad)
+        after = view.mapToScene(center)
+        self.assertAlmostEqual(after.x() - before.x(), -45, delta=2)
+        self.assertAlmostEqual(after.y() - before.y(), -30, delta=2)
+        self.assertAlmostEqual(view.transform().m11(), 1.0)
+        wheel(QPoint(0, 0), QPoint(120, 0))
+        self.assertAlmostEqual(view.transform().m11(), 1.0)
+        wheel(QPoint(0, 0), QPoint(0, 120))
+        self.assertGreater(view.transform().m11(), 1.0)
+
+    def test_native_pinch_zooms_about_gesture_position(self):
+        view = self.window.view
+        point = QPointF(210, 160)
+        before = view.mapToScene(point.toPoint())
+        event = QNativeGestureEvent(Qt.ZoomNativeGesture,
+                                    QPointingDevice.primaryPointingDevice(), 2,
+                                    point, point, QPointF(view.mapToGlobal(point.toPoint())),
+                                    0.2, QPointF(0, 0))
+        self.app.sendEvent(view.viewport(), event)
+        self.assertTrue(event.isAccepted())
+        after = view.mapToScene(point.toPoint())
+        self.assertAlmostEqual(view.transform().m11(), 1.2)
+        self.assertAlmostEqual(after.x(), before.x(), delta=1)
+        self.assertAlmostEqual(after.y(), before.y(), delta=1)
+
+    def test_action_tooltips_describe_the_typical_case(self):
+        self.assertIn('Center the whole graph in view.', self.window.fit_action.toolTip())
+        self.assertIn('Change the label of a vertex or edge.', self.window.rename_action.toolTip())
+        self.assertIn('Previous vertex/edge type.', self.window.previous_type_action.toolTip())
+        self.assertIn('Next vertex/edge type.', self.window.next_type_action.toolTip())
+        self.assertIn('Add a control point along the edge. Drag to reshape.',
+                      self.window.add_curve_action.toolTip())
+        self.assertIn('Disconnect the selection from the rest', self.window.cut_action.toolTip())
+        tooltips = {definition.name: action.toolTip()
+                    for definition, action in self.window.extension_actions}
+        self.assertIn('Add a false twin vertex.', tooltips['Twin'])
+        self.assertIn('Contract the selection.', tooltips['Contract'])
+        self.assertIn('Contract nearby vertices.', tooltips['Fuse'])
+        self.assertEqual(tooltips['Complement'], 'Complement')
+        self.assertIn('Add a pendant vertex.', tooltips['Pendant'])
+        self.assertIn('Halve the spacing', self.window.grid_up_action.toolTip())
+
     def test_onboarding_hint_retires_after_three_basic_gestures(self):
         canvas = self.window.view.viewport()
         hint = self.window.onboarding_hint
         self.assertTrue(hint.isVisible())
+        self.assertIn('Secondary-drag for edges and lasso selection', hint.text())
         height_with_hint = canvas.height()
         QTest.mouseClick(canvas, Qt.LeftButton, pos=self.position(0, 0))
         QTest.mouseClick(canvas, Qt.LeftButton, pos=self.position(120, 0))
@@ -435,6 +623,35 @@ class QtEditorTests(unittest.TestCase):
         self.assertTrue(self.window.statusBar().isVisible())
         self.window.statusBar().clearMessage()
         self.assertFalse(self.window.statusBar().isVisible())
+
+    def test_controls_guide_and_toolbar_left_padding(self):
+        self.window.menu_tabs.open_tab(1)
+        self.app.processEvents()
+        toolbar = self.window.menu_tabs.widget(1)
+        first_button = toolbar.widgetForAction(self.window.undo_action)
+        self.assertGreaterEqual(first_button.geometry().left(), 6)
+        self.assertEqual(self.window.help_button.text(), '?')
+        self.assertTrue(self.window.help_button.isVisible())
+        tabs = self.window.menu_tabs
+        self.assertIs(tabs.tabBar().tabButton(tabs.count() - 1, QTabBar.RightSide),
+                      self.window.help_button)
+        self.assertIsNone(tabs.cornerWidget(Qt.TopRightCorner))
+        self.assertFalse(self.window.help_dock.isVisible())
+        self.window.help_button.click()
+        self.assertTrue(self.window.help_dock.isVisible())
+        self.assertIn('Secondary-drag', self.window.help_text.toPlainText())
+        self.assertIn('Essential menus', self.window.help_text.toPlainText())
+        self.assertIn('Created by Cyril Pujol', self.window.help_text.toPlainText())
+        self.assertIn('https://github.com/CyrilPujol/graph-builder',
+                      self.window.help_text.toHtml())
+        self.assertIn('https://www.irif.fr/~cpujol/', self.window.help_text.toHtml())
+        self.window.help_button.click()
+        self.assertFalse(self.window.help_dock.isVisible())
+
+    def test_empty_custom_menu_explains_how_to_add_buttons(self):
+        toolbar = self.window.menu_tabs.widget(8)
+        labels = [label.text() for label in toolbar.findChildren(QLabel)]
+        self.assertIn('Add functions to your launch script with the @button decorator.', labels)
 
     def test_transformation_has_seven_square_selection_buttons(self):
         window = self.window
@@ -486,16 +703,16 @@ class QtEditorTests(unittest.TestCase):
     def test_file_basic_and_edition_menu_contents(self):
         tabs = self.window.menu_tabs
         self.assertEqual([tabs.tabText(index) for index in range(tabs.count())],
-                         ['File', 'Basic', 'Edition', 'Grid', 'Graph properties',
-                          'Layout', 'Info', 'Standard graphs', 'Custom'])
+                         ['File', 'Basic', 'Edition', 'Guides', 'Graph properties',
+                         'Layout', 'Info', 'Standard graphs', 'Custom'])
         self.assertEqual([action.text() for action in tabs.widget(0).actions()],
                          ['New', 'Open…', 'Save', 'Save As…', 'Export to TikZ…'])
         self.assertEqual([action.text() for action in tabs.widget(1).actions()[:8]],
                          ['Undo', 'Redo', 'Copy', 'Paste', 'Select all', 'Delete',
                           'Fit graph', 'Rename…'])
         self.assertEqual([action.text() for action in tabs.widget(2).actions()][2:],
-                         ['Curve point', 'Vertex cut',
-                          'Contract', 'Complement', 'Pendant'])
+                         ['Curve point', 'Cut',
+                          'Twin', 'Contract', 'Fuse', 'Complement', 'Pendant'])
 
     def test_space_fits_graph_without_zooming_past_default(self):
         self.window.add_node(QPointF(200, 100))
@@ -508,6 +725,29 @@ class QtEditorTests(unittest.TestCase):
         self.window.add_node(QPointF(3000, 100))
         self.window.fit_graph()
         self.assertLess(self.window.view.transform().m11(), 1)
+
+    def test_fit_on_empty_graph_resets_zoom_and_origin(self):
+        self.window.view.zoom_by_delta(240, QPointF(300, 200))
+        self.window.view.centerOn(2500, -1800)
+        self.window.fit_graph()
+        center = self.window.view.mapToScene(self.window.view.viewport().rect().center())
+        self.assertAlmostEqual(self.window.view.transform().m11(), 1)
+        self.assertAlmostEqual(center.x(), 0, delta=2)
+        self.assertAlmostEqual(center.y(), 0, delta=2)
+
+    def test_disconnected_random_graph_and_arrange_stay_in_view(self):
+        nodes = self.window.add_standard_graph('random', {'n': 80, 'p': 0, 'seed': 7})
+        viewport = self.window.view.viewport().rect()
+        points = [self.window.view.mapFromScene(
+            QPointF(*self.window.graph.nodes[node]['position'])) for node in nodes]
+        self.assertTrue(all(viewport.contains(point) for point in points))
+        for node in nodes:
+            self.window.graph.nodes[node]['position'] = (0, 0)
+        self.window.rebuild_scene()
+        self.assertTrue(self.window.arrange_graph())
+        points = [self.window.view.mapFromScene(
+            QPointF(*self.window.graph.nodes[node]['position'])) for node in nodes]
+        self.assertTrue(all(viewport.contains(point) for point in points))
 
     def test_pendant_action_keeps_parents_selected_for_more_children(self):
         self.window.add_node(QPointF(0, 0))
@@ -557,13 +797,27 @@ class QtEditorTests(unittest.TestCase):
         self.window.add_curve_point_at('0', '1', QPointF(50, 40))
         self.window.deselect()
         edge = self.window.edge_items[self.window.edge_key('0', '1')]
-        expected = edge.path().pointAtPercent(.5)
         edge.setSelected(True)
         self.window.add_curve_action.trigger()
         points = _edge_curve_points(self.window.graph, '0', '1')
         self.assertEqual(len(points), 2)
-        self.assertAlmostEqual(points[0][0], expected.x())
-        self.assertAlmostEqual(points[0][1], expected.y())
+        new_point = next(point for point in points if point != (50, 40))
+        self.assertGreater(new_point[0], 0)
+        self.assertLess(new_point[0], 100)
+        self.assertGreater(new_point[1], 0)
+
+    def test_curve_point_button_spreads_repeated_points_and_has_no_shortcut(self):
+        self.assertTrue(self.window.add_curve_action.shortcut().isEmpty())
+        self.window.add_node(QPointF(0, 0))
+        self.window.add_node(QPointF(100, 0))
+        self.window.toggle_edge('0', '1')
+        self.window.edge_items[self.window.edge_key('0', '1')].setSelected(True)
+        for count in range(1, 4):
+            self.window.add_curve_action.trigger()
+            points = _edge_curve_points(self.window.graph, '0', '1')
+            self.assertEqual(len(points), count)
+            self.assertEqual(len(set(points)), count)
+        self.assertEqual([round(point[0]) for point in points], [25, 50, 75])
 
     def test_drag_inserts_curve_point_between_existing_controls(self):
         self.window.add_node(QPointF(0, 0))
@@ -688,6 +942,39 @@ class QtEditorTests(unittest.TestCase):
         self.window.run_extension(actions['Contract'])
         self.assertNotIn('0', self.window.graph)
         self.assertNotIn('1', self.window.graph)
+
+    def test_fuse_shortcut_uses_single_selected_vertex_and_is_undoable(self):
+        self.window.add_node(QPointF(0, 0))
+        self.window.add_node(QPointF(3, 4))
+        self.window.add_node(QPointF(80, 0))
+        self.window.graph.nodes['0']['label'] = 'Keep me'
+        self.window.node_items['0'].setSelected(True)
+        fuse_action = next(action for definition, action in self.window.extension_actions
+                           if definition.name == 'Fuse')
+        self.assertEqual(fuse_action.shortcut().toString(), 'F')
+        self.window.run_extension(next(definition for definition, _ in self.window.extension_actions
+                                       if definition.name == 'Fuse'))
+        self.assertEqual(set(self.window.graph), {'2', '3'})
+        self.assertEqual(self.window.graph.nodes['3']['label'], 'Keep me')
+        self.assertEqual(self.window.selection.nodes, {'3'})
+        self.window.undo()
+        self.assertEqual(set(self.window.graph), {'0', '1', '2'})
+
+    def test_fuse_without_selection_animates_each_result(self):
+        self.window.add_node(QPointF(0, 0))
+        self.window.add_node(QPointF(9, 0))
+        self.window.add_node(QPointF(80, 0))
+        definition = next(definition for definition, _ in self.window.extension_actions
+                          if definition.name == 'Fuse')
+        self.assertTrue(definition.is_available(self.window.context()))
+        self.window.run_extension(definition)
+        self.assertEqual(set(self.window.graph), {'2', '3'})
+        self.assertEqual(len(self.window.scene.fusion_marks), 1)
+        self.assertTrue(self.window.scene._fusion_timer.isActive())
+        for _ in range(9):
+            self.window.scene._advance_fusion_animation()
+        self.assertFalse(self.window.scene.fusion_marks)
+        self.assertFalse(self.window.scene._fusion_timer.isActive())
 
     def test_type_buttons_and_shortcuts(self):
         self.window.add_node(QPointF(0, 0))

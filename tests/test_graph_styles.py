@@ -4,13 +4,29 @@ import unittest
 from pathlib import Path
 
 from graph_builder_lib import convert_from_file, empty_graph, write_graph_file
-from graph_styles import (copy_style, effective_style, paste_style, presets,
+from graph_styles import (DEFAULT_PRESET_ID, base_style, copy_style, effective_style, paste_style, presets,
                           remove_preset, set_edge_style, set_overrides,
-                          set_palette_style, set_preset, vertex_boundary_distance)
+                          reset_palette_style, set_palette_style, set_preset, vertex_boundary_distance)
 from tikz_export import graph_to_tikz
 
 
 class GraphStyleTests(unittest.TestCase):
+    def test_type_zero_default_and_reset_restore_white_vertex(self):
+        graph = empty_graph()
+        graph.add_node('0', position=(0, 0), col=0)
+        graph.add_node('1', position=(100, 0), col=0)
+        self.assertEqual(base_style('vertex', 0)['fill'], '#ffffff')
+        self.assertEqual(base_style('vertex', 0)['outline_width'], 2)
+        source = graph_to_tikz(graph)
+        self.assertIn('fill=white', source)
+        self.assertIn('line width=1pt', source)
+        self.assertEqual(source.count('style=vertex_0'), 2)
+        set_palette_style(graph, 'vertex', 0, {'fill': '#123456'})
+        self.assertEqual(effective_style(graph, 'vertex', graph.nodes['0'])['fill'], '#123456')
+        reset_palette_style(graph, 'vertex', 0)
+        self.assertEqual(effective_style(graph, 'vertex', graph.nodes['0'])['fill'], '#ffffff')
+        self.assertNotIn('vertex_styles', graph.graph)
+
     def setUp(self):
         self.graph = empty_graph()
         self.graph.add_node('a', position=(0, 0), col=1, label='a')
@@ -32,6 +48,19 @@ class GraphStyleTests(unittest.TestCase):
         self.assertNotEqual(effective_style(graph, 'vertex', graph.nodes['a'])['fill'], '#123456')
         set_preset(graph, 'vertex', 'leaf', 'Leaf', {'shape': 'triangle'})
         self.assertEqual(effective_style(graph, 'vertex', graph.nodes['a'])['shape'], 'triangle')
+
+    def test_default_preset_follows_type_style_and_is_not_stored(self):
+        graph = self.graph
+        for kind in ('vertex', 'edge'):
+            self.assertEqual(presets(graph, kind)[DEFAULT_PRESET_ID]['name'], 'Default style')
+            self.assertNotIn(f'{kind}_presets', graph.graph)
+        graph.nodes['a']['style_preset'] = DEFAULT_PRESET_ID
+        set_palette_style(graph, 'vertex', 1, {'fill': '#123456'})
+        self.assertEqual(effective_style(graph, 'vertex', graph.nodes['a'])['fill'], '#123456')
+        graph.nodes['a']['col'] = 2
+        self.assertNotEqual(effective_style(graph, 'vertex', graph.nodes['a'])['fill'], '#123456')
+        remove_preset(graph, 'vertex', DEFAULT_PRESET_ID)
+        self.assertIn(DEFAULT_PRESET_ID, presets(graph, 'vertex'))
 
     def test_delete_preset_freezes_appearance_and_copy_is_independent(self):
         graph = self.graph

@@ -33,6 +33,23 @@ or creates that file when the graph is first saved. Named graphs save on close;
 an unsaved graph made with **File → New** asks before closing. File dialogs are
 supplied by Qt on macOS, Windows and Linux.
 
+To use the editor as one step in a Python program, call `edit_graph` instead of
+`main`:
+
+```python
+import networkx as nx
+from graph_builder_lib import edit_graph
+
+graph = edit_graph(nx.path_graph(4))  # Draw or edit, then close the window.
+print(graph.number_of_edges())       # Continue with the edited graph.
+```
+
+`edit_graph()` also starts with an empty graph. It accepts an `nx.Graph` or
+`nx.DiGraph`, leaves the input untouched, and returns the currently open graph
+when its window closes. Saving a file is optional. `main()` remains the simple
+launcher for a standalone editor and returns an application exit code rather
+than a graph. Both calls discover `@button` functions in the calling module.
+
 `graph_builder.py` is the file to edit for personal buttons. The editor and
 reusable graph code live in the other Python modules. The default
 `graph.graphml` and `graph.tex` are ignored by Git so a local drawing or export
@@ -41,17 +58,19 @@ share under `examples/`.
 
 ## Editing
 
-The top menu row (File, Basic, Edition, Grid, Graph properties, Layout, Info,
+The top menu row (File, Basic, Edition, Guides, Graph properties, Layout, Info,
 Standard graphs, Custom) shows one compact
 row of controls for the chosen menu. Click the active menu again to collapse the
-controls completely. The canvas uses a single interaction mode:
+controls completely. The small **?** button opens a quick controls guide inside
+the editor. The canvas uses a single interaction mode:
 
 - Left-click a vertex or edge to select it. Left-click empty space to create a
   vertex. Drag a vertex to move it; drag empty space for a vertex-only rectangle
   selection.
 - Right-drag (or Ctrl-left-drag) from a vertex to another vertex to toggle an
   edge. Starting from a selected vertex applies this to every selected vertex.
-  With no selection, right-clicking a vertex without dragging deletes it.
+  Right-clicking a vertex without dragging deletes that vertex, even when
+  other vertices are selected.
 - Hold Shift during a right-drag to make a path. Each vertex you pass through
   immediately receives an edge from the previous vertex and becomes the next
   starting point. You can press or release Shift partway through the drag.
@@ -59,8 +78,9 @@ controls completely. The canvas uses a single interaction mode:
   one undo step. On a trackpad, Ctrl+Shift-left-drag does the same, while a
   Ctrl+Shift-left-click still removes a vertex from the selection.
 - Right-drag empty space for a lasso selection. A click on empty space clears an
-  existing selection. Option/Alt-drag or middle-drag pans, and the wheel zooms
-  around the pointer.
+  existing selection. Option/Alt-drag or middle-drag pans. Two-finger trackpad
+  scrolling pans in both directions, and pinching zooms around the gesture.
+  A mouse wheel still zooms around the pointer, while a horizontal wheel pans.
 - Hold Shift while clicking, rectangle-selecting or lasso-selecting to add;
   Ctrl+Shift removes instead.
 - Double-click a vertex or edge to open **Properties** for its label and
@@ -76,31 +96,54 @@ controls completely. The canvas uses a single interaction mode:
   Rename, and seven Transformation buttons. Grow and Shrink scale the selected
   vertices by 1.1 or 1/1.1 around their center, including internal edge curve
   points, without changing the view zoom. **Edition** contains Type −/+,
-  Curve point, Vertex cut, Contract, Complement, and Pendant. Pendant adds
+  Curve point, Cut, Contract, Complement, and Pendant. Pendant adds
   one outward-growing leaf to each selected vertex and keeps the original
   selection, so repeated presses add more children. **File** contains New,
   Open, Save, Save As, and Export to TikZ.
-  **Grid** offers square, radial or triangular grids and a radial count up to 99. Its fixed
+  **Guides** offers square, radial or triangular grids and a radial count up to 99. Their fixed
   origin is `(0, 0)`, one coordinate unit is four vertex diameters, and the
-  default precision is `1/4`. The + precision button halves grid spacing; −
+  default spacing is `1/4`. The + density button halves grid spacing, while −
   doubles it. Changes use exact factors of two without
   moving untouched vertices. In the radial grid, main rays are bold; rays from
   the one-unit precision pattern and one-unit circles are semi-bold.
+  **Axes** shows only the two global coordinate axes. It is the startup
+  guide, with **Auto-snap** enabled by default. A thin light-gray guide appears
+  during a drag wherever the current alignment would snap. Auto-snap aligns
+  dragged vertices with other visible vertices, either axis, or the origin.
+  It does not snap newly created vertices or pull toward offscreen vertices.
+  A dragged group moves together, preserving its internal spacing. The snap
+  tolerance is measured in screen pixels and decreases as the reference
+  vertex gets farther away.
   **Graph properties** controls labels, vertex/edge
   type counts and directedness. Its **Styles** menu opens Properties, shared
-  type styles, named presets, and Copy/Paste style. Ctrl+Shift+C and
+  type styles, and Copy/Paste style. Properties and Type styles open in separate,
+  movable windows. The Type styles editor shows a live preview while browsing
+  types and can reset the current vertex or edge type to its built-in look.
+  Built-in vertex type 0 is white with a black 2-pixel outline, matching its
+  TikZ export. When changing a directed graph to undirected, opposite arcs
+  become one edge. If they disagree, the arc from the lower internal ID is
+  kept. If only one direction exists, that arc is kept.
+  A custom look can be applied to every
+  object of the same type from the Properties dialog. The edited object then
+  returns to inheriting from that type. Existing named presets in old files
+  still render, but the editor no longer creates or manages them.
+  Ctrl+Shift+C and
   Ctrl+Shift+V copy and paste an independent appearance snapshot. A style
-  inherits from its type, then an optional named preset, then
-  individual overrides. Removing a preset freezes its users' appearances.
-  The Properties dialog shows the label and type first. Its expandable Advanced
+  inherits from its type, with optional individual overrides.
+  The Properties dialog shows the label and type first. Its expandable Style
   section has one whole-look choice, preview, LaTeX labels,
   and raw TikZ options. Raw options appear last in the export and can override
   generated options. They are not fully previewed and may fail to compile.
-  **Custom** contains Graph coloring, Twin, Switch, Randomize, and Distance-2
-  colors.
+  **Edition** includes Twin, which gives all new twins the same displacement,
+  and Fuse (F), which contracts selected vertices within 10 graph units of
+  each other. With one vertex selected, Fuse also considers unselected vertices
+  at that position. With no selection, it checks the whole graph.
+  **Custom** contains Graph coloring, Switch, Randomize, and Distance-2 colors.
 - **Layout → Arrange** applies a force-directed placement immediately. With selected
   vertices, only those vertices move. With no selection, all unpinned vertices
-  move. Undo restores the previous drawing in one step. Pin and Unpin selection mark vertices as layout anchors, but
+  move. A full-graph arrangement stays centered in the current view and fits
+  comfortably within it. It also works without the optional NumPy package, using a pure-Python
+  fallback. Undo restores the previous drawing in one step. Pin and Unpin selection mark vertices as layout anchors, but
   pinned vertices can still be moved by hand. Pins survive saving and loading.
   **Relax while dragging** is optional and initially off. While a vertex is
   held with the mouse, even without pointer movement, it adjusts only
@@ -134,12 +177,13 @@ controls completely. The canvas uses a single interaction mode:
   numeric clockwise order; Kneser and Schrijver layouts follow cyclic-shift
   orbits, with `KG(5,2)` drawn as a Petersen graph. Schrijver `SG(n,k)` keeps
   only the cyclically nonadjacent `k`-subsets and requires `n ≥ 2k`.
-- Keyboard shortcuts include Space for Fit graph, A for a curve point, T and
-  Shift+T for next and previous type, C for Vertex cut, L for labels, P for Pendant, W for twin, S for
+- Keyboard shortcuts include Space for Fit graph, T and
+  Shift+T for next and previous type, C for Cut, L for labels, P for Pendant, W for twin, S for
   switch, O for contract,
   Esc to deselect, ⌘A to select all vertices, and the usual
   platform shortcuts for save, copy, paste and undo/redo. Button tooltips show
-  the shortcut when one is available.
+  the shortcut when one is available. Custom buttons also show the first line
+  of their function's docstring.
 
 **File → Export to TikZ** writes the visible vertex and edge labels to a `.tex`
 file. GraphML save/load keeps positions, colors, labels and edge curves.

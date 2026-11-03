@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import random
 
 import networkx as nx
@@ -18,35 +17,6 @@ def graph_coloring(graph):
     colors = nx.coloring.greedy_color(graph.to_undirected())
     nx.set_node_attributes(graph, colors, 'col')
     return graph
-
-
-@button('Twin', shortcut='w', selection='vertices')
-def twin(graph, vertices, return_new_vertices=False):
-    """Add one twin for every selected vertex, using the original adjacency."""
-    originals = [vertex for vertex in graph.nodes if vertex in vertices]
-    if not originals:
-        return (graph, set()) if return_new_vertices else graph
-    directed = graph.graph.get('graph_type') != 'graph'
-    original_edges = [
-        (source, target, copy.deepcopy(attributes))
-        for source, target, attributes in graph.edges(data=True)
-    ]
-    new_vertices = set()
-    for index, vertex in enumerate(originals, start=1):
-        new_vertex = unused_label(graph)
-        new_vertices.add(new_vertex)
-        x, y = graph.nodes[vertex]['position']
-        graph.add_node(new_vertex, position=(x + 20 * index, y + 20 * index), col=graph.nodes[vertex]['col'])
-        for source, target, attributes in original_edges:
-            if source == vertex:
-                graph.add_edge(new_vertex, target, **copy.deepcopy(attributes))
-                if not directed:
-                    graph.add_edge(target, new_vertex, **copy.deepcopy(attributes))
-            if directed and target == vertex:
-                graph.add_edge(source, new_vertex, **copy.deepcopy(attributes))
-            elif not graph.is_directed() and target == vertex:
-                graph.add_edge(new_vertex, source, **copy.deepcopy(attributes))
-    return (graph, new_vertices) if return_new_vertices else graph
 
 
 @button('Randomize', selection='vertices')

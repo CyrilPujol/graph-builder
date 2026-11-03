@@ -96,10 +96,34 @@ def flip_edge(graph, source, target, edge_color=0):
 
 def set_directed(graph, directed):
     if not directed:
-        for source, target, data in list(graph.edges(data=True)):
-            if not graph.has_edge(target, source):
-                graph.add_edge(target, source, **copy.deepcopy(data))
+        # A directed pair can carry two different looks or labels. Keep the
+        # arc from the lower internal ID when both exist, then mirror it.
+        # If only one direction exists, that existing arc is the winner.
+        def id_order(node):
+            identifier = str(node)
+            return (0, int(identifier), identifier) if identifier.isdecimal() else (1, identifier)
+
+        pairs = {frozenset((source, target)) for source, target in graph.edges}
+        retained = []
+        for pair in sorted(pairs, key=lambda pair: tuple(sorted(map(id_order, pair)))):
+            if len(pair) != 2:
+                continue
+            first, second = sorted(pair, key=id_order)
+            source, target = ((first, second) if graph.has_edge(first, second)
+                              else (second, first))
+            retained.append((source, target, copy.deepcopy(graph.edges[source, target]),
+                             _edge_curve_points(graph, source, target)))
+        for source, target, data, _ in retained:
+            for start, end in ((source, target), (target, source)):
+                if not graph.has_edge(start, end):
+                    graph.add_edge(start, end)
+                graph.edges[start, end].clear()
+                graph.edges[start, end].update(copy.deepcopy(data))
     graph.graph['graph_type'] = 'digraph' if directed else 'graph'
+    if not directed:
+        for source, target, _, points in retained:
+            if points:
+                _set_edge_curve_points(graph, source, target, points)
 
 
 def _edge_curve_points(graph, source, target):
@@ -138,12 +162,15 @@ def _set_edge_curve_points(graph, source, target, points):
         graph.edges[target, source].pop('curve_points', None)
 
 
-def contract(graph, vertices):
+def contract(graph, vertices, new_vertex=None, representative=None):
     """Contract selected vertices (or selected-edge endpoints) into one vertex."""
     vertices = set(vertices) & set(graph.nodes)
     if len(vertices) < 2:
         return graph
-    new_vertex = unused_label(graph)
+    if new_vertex is None:
+        new_vertex = unused_label(graph)
+    elif new_vertex in graph:
+        raise ValueError(f'Contracted vertex ID already exists: {new_vertex!r}')
     positions = [graph.nodes[vertex]['position'] for vertex in vertices]
     position = (sum(x for x, _ in positions) / len(positions),
                 sum(y for _, y in positions) / len(positions))
@@ -152,15 +179,86 @@ def contract(graph, vertices):
     for vertex, attributes in graph.nodes(data=True):
         if vertex not in vertices:
             new_graph.add_node(vertex, **copy.deepcopy(attributes))
-    representative = next(vertex for vertex in graph.nodes if vertex in vertices)
-    new_graph.add_node(new_vertex, position=position,
-                       col=graph.nodes[representative].get('col', 0))
+    if representative is None:
+        representative = next(vertex for vertex in graph.nodes if vertex in vertices)
+    elif representative not in vertices:
+        raise ValueError('Representative must be one of the contracted vertices')
+    attributes = copy.deepcopy(graph.nodes[representative])
+    attributes['position'] = position
+    new_graph.add_node(new_vertex, **attributes)
     for source, target, attributes in graph.edges(data=True):
         source = new_vertex if source in vertices else source
         target = new_vertex if target in vertices else target
         if source != target:
             new_graph.add_edge(source, target, **copy.deepcopy(attributes))
     return new_graph
+
+
+def fuse(graph, vertices, tolerance=10.0):
+    """Contract each near-coincident group, preserving a representative's style.
+
+    With no selection, consider the whole graph. A single selected vertex also
+    considers unselected vertices at its position.
+    The tolerance is measured in graph coordinates, independently of zoom.
+    Return the replacement graph and the IDs of the newly fused vertices.
+    """
+    selected = [node for node in graph if node in vertices]
+
+    def nearby(first, second):
+        x1, y1 = graph.nodes[first]['position']
+        x2, y2 = graph.nodes[second]['position']
+        return hypot(x1 - x2, y1 - y2) <= tolerance
+
+    if len(selected) == 1:
+        candidates = [selected[0]] + [node for node in graph
+                                      if node != selected[0] and nearby(node, selected[0])]
+    else:
+        candidates = selected or list(graph)
+    groups = []
+    for node in candidates:
+        for group in groups:
+            if all(nearby(node, member) for member in group):
+                group.append(node)
+                break
+        else:
+            groups.append([node])
+    if len(selected) == 1:
+        groups = groups[:1]
+    fused = set()
+    reserved = set(graph)
+    next_id = 0
+    for group in groups:
+        if len(group) < 2:
+            continue
+        while str(next_id) in reserved:
+            next_id += 1
+        new_vertex = str(next_id)
+        graph = contract(graph, group, new_vertex, group[0])
+        reserved.add(new_vertex)
+        fused.add(new_vertex)
+    return graph, fused
+
+
+def twin(graph, vertices, return_new_vertices=False, offset=(20, 20)):
+    """Clone each selected vertex's original neighbors with one shared offset."""
+    originals = [node for node in graph if node in vertices]
+    original_edges = [(source, target, copy.deepcopy(data))
+                      for source, target, data in graph.edges(data=True)]
+    added = set()
+    for node in originals:
+        new_node = unused_label(graph)
+        attributes = copy.deepcopy(graph.nodes[node])
+        x, y = attributes['position']
+        attributes['position'] = (x + offset[0], y + offset[1])
+        attributes.pop('label', None)
+        graph.add_node(new_node, **attributes)
+        added.add(new_node)
+        for source, target, data in original_edges:
+            if source == node:
+                graph.add_edge(new_node, target, **copy.deepcopy(data))
+            if target == node:
+                graph.add_edge(source, new_node, **copy.deepcopy(data))
+    return (graph, added) if return_new_vertices else graph
 
 
 def complement(graph, vertices):
@@ -407,6 +505,66 @@ def nearest_grid_point(position, mode, center=(0, 0), unit=30, radial_divisions=
         if distance < best_distance:
             best, best_distance = candidate, distance
     return best
+
+
+def axis_alignment_plan(moved_positions, reference_positions, pixels_per_unit=1.0,
+                        axis_visible=(False, False), origin_visible=False,
+                        include_matches=False):
+    """Find a shared translation and the guide lines that explain it.
+
+    Each coordinate is independent, so a horizontal and vertical alignment may
+    use different reference vertices. Distances are measured in screen pixels
+    for consistent behavior at every zoom level. Farther references require a
+    closer alignment before they attract the moved group. ``axis_visible`` is
+    (vertical axis, horizontal axis). An axis has zero along-line separation.
+    When requested, return the moved and reference indices behind each guide.
+    A virtual axis target has no reference index.
+    """
+    if pixels_per_unit <= 0:
+        empty = ((0.0, 0.0), ())
+        return (*empty, ()) if include_matches else empty
+    moved_positions = list(moved_positions)
+    references = list(reference_positions)
+    if origin_visible and (0, 0) not in references:
+        references.append((0.0, 0.0))
+    offsets = [0.0, 0.0]
+    guides = []
+    matches = []
+    for axis in (0, 1):
+        best = None
+        for moved_index, moved in enumerate(moved_positions):
+            for reference_index, reference in enumerate(references):
+                gap = abs(moved[axis] - reference[axis]) * pixels_per_unit
+                separation = abs(moved[1-axis] - reference[1-axis]) * pixels_per_unit
+                threshold = 18 / (1 + separation / 240)
+                if gap <= threshold:
+                    score = (gap / threshold, gap, separation, tuple(moved), tuple(reference))
+                    if best is None or score < best[0]:
+                        projected = ((reference[0], moved[1]) if axis == 0 else
+                                     (moved[0], reference[1]))
+                        best = (score, reference[axis] - moved[axis],
+                                (tuple(reference), projected), moved_index, reference_index)
+            if axis_visible[axis]:
+                gap = abs(moved[axis]) * pixels_per_unit
+                if gap <= 18:
+                    projected = ((0.0, moved[1]) if axis == 0 else
+                                 (moved[0], 0.0))
+                    score = (gap / 18, gap, 0.0, tuple(moved), projected)
+                    if best is None or score < best[0]:
+                        best = (score, -moved[axis], ((0.0, 0.0), projected),
+                                moved_index, None)
+        if best is not None:
+            offsets[axis] = best[1]
+            guides.append(best[2])
+            matches.append((best[3], best[4]))
+    result = (tuple(offsets), tuple(guides))
+    return (*result, tuple(matches)) if include_matches else result
+
+
+def axis_alignment_offset(moved_positions, reference_positions, pixels_per_unit=1.0):
+    """Return only the translation of an alignment plan."""
+    return axis_alignment_plan(moved_positions, reference_positions,
+                               pixels_per_unit)[0]
 
 
 def snap_unselected_vertices(graph, selected_nodes, mode, center=(0, 0), unit=30,
@@ -673,6 +831,7 @@ class Action:
     checked: Callable[[EditorContext], bool] | None = None
     pair_label: str | Callable[[EditorContext], str] | None = None
     pair_id: str | None = None
+    description: str | None = None
 
     def is_available(self, context):
         return bool(self.available(context))
@@ -736,15 +895,36 @@ def builtin_editor_actions():
                 vertex_color=getattr(interaction, 'vertex_color', None),
                 edge_color=getattr(interaction, 'edge_color', 0))
 
+    def add_twins(context):
+        _, added = twin(context.graph, selected(context), return_new_vertices=True)
+        context.selection.clear()
+        context.selection.nodes.update(added)
+
+    def fuse_nearby(context):
+        graph, added = fuse(context.graph, context.selection.nodes)
+        context.graph = graph
+        if added:
+            context.selection.nodes.intersection_update(graph)
+            context.selection.nodes.update(added)
+            context.selection.edges.clear()
+
     return (
+        Action('builtin:twin', 'Twin', 'w', add_twins,
+               lambda context: bool(selected(context)), library=True, group='edition',
+               description='Add a false twin vertex.'),
         Action('builtin:contract', 'Contract', 'o',
                lambda context: contract(context.graph, selected(context)),
-               can_transform, library=True, group='edition'),
+               can_transform, library=True, group='edition',
+               description='Contract the selection.'),
+        Action('builtin:fuse', 'Fuse', 'f', fuse_nearby,
+               lambda context: bool(context.graph), library=True, group='edition',
+               description='Contract nearby vertices.'),
         Action('builtin:complement', 'Complement', None,
                lambda context: complement(context.graph, selected(context)),
                lambda context: True, library=True, group='edition'),
         Action('builtin:pendant', 'Pendant', 'p', add_pendants,
-               lambda context: bool(context.selection.nodes), library=True, group='edition'),
+               lambda context: bool(context.selection.nodes), library=True, group='edition',
+               description='Add a pendant vertex.'),
         Action('builtin:rotate_left', 'Rotate left 10°', None,
                lambda context: rotate(context.graph, selected(context), -10),
                can_transform, library=True, group='basic',
@@ -779,21 +959,32 @@ def builtin_editor_actions():
 from graph_builder_custom import button, discover_buttons
 
 
-def main(actions=None, graph_file=None, **options):
-    """Launch the editor, discovering registered buttons in the caller's module.
+def _caller_actions(actions, namespace):
+    if actions is None:
+        return discover_buttons(namespace)
+    return [getattr(action, '__graph_button__', action) for action in actions]
 
-    Explicit actions may be Action objects or @button-decorated functions.
+
+def main(actions=None, graph_file=None, **options):
+    """Run Graph Builder as an application, blocking until its window closes.
+
+    Decorated functions in the calling module become Custom buttons. Pass
+    ``actions`` to choose buttons explicitly, or ``graph_file`` to open a
+    particular GraphML file. The return value is an application exit code,
+    not a graph. Use ``edit_graph`` to draw a graph within a Python workflow.
+
+    Example::
+
+        from graph_builder_lib import *
+        main()
     """
     import inspect
     import argparse
-    if actions is None:
-        frame = inspect.currentframe()
-        try:
-            actions = discover_buttons(frame.f_back.f_globals)
-        finally:
-            del frame
-    else:
-        actions = [getattr(action, '__graph_button__', action) for action in actions]
+    frame = inspect.currentframe()
+    try:
+        actions = _caller_actions(actions, frame.f_back.f_globals)
+    finally:
+        del frame
     if graph_file is None:
         parser = argparse.ArgumentParser(add_help=False)
         parser.add_argument('--graph')
@@ -801,3 +992,32 @@ def main(actions=None, graph_file=None, **options):
         graph_file = arguments.graph
     from graph_builder_qt import launch
     return launch(actions=actions, graph_file=graph_file, **options)
+
+
+def edit_graph(graph=None, *, actions=None):
+    """Open a drawing window and return the edited NetworkX graph on close.
+
+    ``graph`` may be an ``nx.Graph`` or ``nx.DiGraph``. It is copied, so the
+    original is never changed. Omit it to start with an empty undirected graph.
+    New vertices receive positions and default drawing attributes. Decorated
+    functions in the calling module become Custom buttons, or pass ``actions``
+    to choose them explicitly. The window blocks this function until closed.
+    Saving to GraphML is optional. If a file is opened in the editor, the
+    currently open graph is the one returned.
+
+    Example::
+
+        import networkx as nx
+        from graph_builder_lib import edit_graph
+
+        graph = edit_graph(nx.path_graph(4))
+        print(graph.number_of_edges())
+    """
+    import inspect
+    frame = inspect.currentframe()
+    try:
+        actions = _caller_actions(actions, frame.f_back.f_globals)
+    finally:
+        del frame
+    from graph_builder_qt import edit_graph_window
+    return edit_graph_window(graph, actions=actions)

@@ -107,13 +107,15 @@ def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
     for value, name in custom_colors.items():
         lines.append(f'\\definecolor{{{name}}}{{HTML}}{{{value[1:]}}}')
 
-    styles = [
-        r'\tikzstyle{vertex_origin}=[circle, draw=black, fill=white, minimum size=5pt, inner sep=0pt]',
-    ]
-    styles.extend(
-        f'\\tikzstyle{{vertex_{color_index}}}=[circle, draw=vertexcolor{color_index}, fill=vertexcolor{color_index}, text=white, minimum size=5pt, inner sep=0pt]'
-        for color_index in vertex_colors
-    )
+    styles = []
+    for color_index in vertex_colors:
+        if color_index == 0:
+            styles.append(r'\tikzstyle{vertex_0}=[circle, draw=black, fill=white, text=black, '
+                          r'line width=1pt, minimum size=5pt, inner sep=0pt]')
+        else:
+            styles.append(f'\\tikzstyle{{vertex_{color_index}}}=[circle, '
+                          f'draw=vertexcolor{color_index}, fill=vertexcolor{color_index}, '
+                          'text=white, minimum size=5pt, inner sep=0pt]')
     styles.extend(
         f'\\tikzstyle{{edge_{color_index}}}=[draw=edgecolor{color_index}, line width=1pt, fill=none]'
         for color_index in edge_colors
@@ -130,7 +132,7 @@ def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
 
     show_labels = labels_visible(graph)
     for node in nodes:
-        style = 'vertex_origin' if node == 0 or node == '0' else f"vertex_{_color_index(graph.nodes[node])}"
+        style = f"vertex_{_color_index(graph.nodes[node])}"
         x, y = tikz_position(positions[node])
         appearance = vertex_appearances.get(node)
         label_value = graph.nodes[node].get('label', node)

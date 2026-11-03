@@ -15,6 +15,8 @@ FIELDS = {
              'label_offset', 'latex_label', 'tikz_options'),
 }
 
+DEFAULT_PRESET_ID = '__default_style__'
+
 
 def _read(value):
     if isinstance(value, dict):
@@ -33,6 +35,10 @@ def _write(value):
 def base_style(kind, color_index):
     color = '#%02x%02x%02x' % colormap_1(color_index)
     if kind == 'vertex':
+        if int(color_index) == 0:
+            return dict(fill='#ffffff', outline='#000000', shape='circle', size=34.0,
+                        outline_width=2.0, text='auto', latex_label=False,
+                        tikz_options='')
         return dict(fill=color, outline='#222222', shape='circle', size=34.0,
                     outline_width=1.5, text='auto', latex_label=False,
                     tikz_options='')
@@ -83,7 +89,9 @@ def palette_styles(graph, kind):
 
 
 def presets(graph, kind):
-    return _read(graph.graph.get(f'{kind}_presets'))
+    stored = _read(graph.graph.get(f'{kind}_presets'))
+    stored.pop(DEFAULT_PRESET_ID, None)
+    return {DEFAULT_PRESET_ID: {'name': 'Default style', 'style': {}}} | stored
 
 
 def effective_style(graph, kind, attributes):
@@ -116,8 +124,20 @@ def set_palette_style(graph, kind, index, style):
     graph.graph[f'{kind}_styles'] = _write(values)
 
 
+def reset_palette_style(graph, kind, index):
+    """Remove a type's shared customization and restore its built-in look."""
+    values = palette_styles(graph, kind)
+    values.pop(str(index), None)
+    if values:
+        graph.graph[f'{kind}_styles'] = _write(values)
+    else:
+        graph.graph.pop(f'{kind}_styles', None)
+
+
 def set_preset(graph, kind, identifier, name, style):
-    values = presets(graph, kind)
+    if identifier == DEFAULT_PRESET_ID:
+        raise ValueError('The built-in Default style cannot be edited')
+    values = _read(graph.graph.get(f'{kind}_presets'))
     values[identifier] = {'name': name,
                           'style': {key: value for key, value in style.items()
                                     if key in FIELDS[kind]}}
@@ -126,7 +146,9 @@ def set_preset(graph, kind, identifier, name, style):
 
 def remove_preset(graph, kind, identifier):
     """Freeze the effective appearance of linked objects before removing it."""
-    values = presets(graph, kind)
+    if identifier == DEFAULT_PRESET_ID:
+        return
+    values = _read(graph.graph.get(f'{kind}_presets'))
     if identifier not in values:
         return
     data_items = (graph.nodes.values() if kind == 'vertex' else

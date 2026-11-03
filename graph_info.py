@@ -81,21 +81,28 @@ def _structure(graph):
 def _distances(graph):
     n = len(graph)
     if not n:
-        return ['Diameter: — (empty graph)', 'Mean shortest-path length: —']
+        return ['Diameter: — (empty graph)', 'Radius: —', 'Mean shortest-path length: —']
     if n == 1:
-        return ['Diameter: 0', 'Mean shortest-path length: 0.000']
+        return ['Diameter: 0', 'Radius: 0', 'Mean shortest-path length: 0.000']
     connected = nx.is_strongly_connected(graph) if graph.is_directed() else nx.is_connected(graph)
     if not connected:
         reason = 'not strongly connected' if graph.is_directed() else 'disconnected'
-        return [f'Diameter: ∞ ({reason})', 'Mean shortest-path length: ∞']
+        return [f'Diameter: ∞ ({reason})', 'Radius: ∞', 'Mean shortest-path length: ∞']
     if n <= EXACT_DISTANCE_LIMIT:
-        return [_line('Diameter', nx.diameter(graph, usebounds=not graph.is_directed())),
+        eccentricities = nx.eccentricity(graph)
+        return [_line('Diameter', max(eccentricities.values())),
+                _line('Radius', min(eccentricities.values())),
                 _line('Mean shortest-path length', f'{nx.average_shortest_path_length(graph):.3f}')]
-    lower_bound = nx.algorithms.approximation.diameter(graph, seed=0)
     sources = random.Random(0).sample(list(graph), min(DISTANCE_SAMPLE_SIZE, n))
-    totals = [sum(nx.single_source_shortest_path_length(graph, source).values()) / (n - 1)
-              for source in sources]
-    return [_line('Diameter', f'≥ {lower_bound} (lower bound)'),
+    lengths = {source: nx.single_source_shortest_path_length(graph, source)
+               for source in sources}
+    eccentricities = {source: max(distances.values()) for source, distances in lengths.items()}
+    totals = [sum(distances.values()) / (n - 1) for distances in lengths.values()]
+    diameter_bound = max(eccentricities.values())
+    if not graph.is_directed():
+        diameter_bound = max(diameter_bound, nx.algorithms.approximation.diameter(graph, seed=0))
+    return [_line('Diameter', f'≥ {diameter_bound} (lower bound)'),
+            _line('Radius', f'≤ {min(eccentricities.values())} (upper bound)'),
             _line('Mean shortest-path length',
                   f'≈ {sum(totals) / len(totals):.3f} ({len(sources)} sampled sources)')]
 
@@ -132,7 +139,7 @@ def _greedy_independent_set(graph):
 def _bounds(graph):
     simple = graph.to_undirected() if graph.is_directed() else graph
     if not simple:
-        return ['Clique number ω: 0', 'Independence number α: 0', 'Chromatic number χ: 0']
+        return ['Clique number ω: 0', 'Independence number α: 0', 'Chromatic number: 0 ≤ χ ≤ 0']
     clique = _greedy_clique(simple)
     independent = _greedy_independent_set(simple)
     colorings = [nx.coloring.greedy_color(simple, strategy='largest_first')]
@@ -141,8 +148,7 @@ def _bounds(graph):
     colors_used = min(max(colors.values(), default=-1) + 1 for colors in colorings)
     lines = [_line('Clique number ω', f'≥ {len(clique)} (clique found)'),
              _line('Independence number α', f'≥ {len(independent)} (independent set found)'),
-             _line('Chromatic number χ',
-                   str(colors_used) if colors_used == len(clique) else f'{len(clique)} ≤ χ ≤ {colors_used}')]
+             _line('Chromatic number', f'{len(clique)} ≤ χ ≤ {colors_used}')]
     if graph.is_directed():
         lines.append('Bounds ignore arrow directions.')
     return lines

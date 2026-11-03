@@ -11,6 +11,7 @@ import copy
 import json
 import sys
 import time
+from bisect import bisect_right
 from math import sqrt
 from pathlib import Path
 
@@ -18,14 +19,15 @@ from PySide6.QtCore import QPoint, QPointF, QProcess, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QColor, QCursor, QIcon, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFrame,
-    QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QDialog, QSpinBox, QStackedWidget,
-    QTabWidget, QTextEdit, QToolBar, QToolButton, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QSpinBox, QStackedWidget,
+    QTabBar,
+    QTabWidget, QTextBrowser, QTextEdit, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
 from graph_builder_lib import (
     Action, EdgeRef, EditorContext, SelectionState, _deserialize_graph,
     _edge_curve_points, _serialize_graph, _set_edge_curve_points,
-    builtin_editor_actions, convert_from_file, copy_graph_selection,
+    axis_alignment_plan, builtin_editor_actions, convert_from_file, copy_graph_selection,
     cut_edges_to_rest, empty_graph, execute_action, flip_edge, labels_visible,
     logical_edges, nearest_grid_point, selected_vertices,
     paste_graph_selection, set_directed, set_edge_label, unused_label,
@@ -41,7 +43,7 @@ from graph_layout import (PIN_ATTRIBUTE, arrange_positions, movable_vertices,
 from graph_info import ANALYSIS_TIMEOUT_MS, analyze, topology_payload
 from tikz_export import write_tikz
 from standard_graphs import STANDARD_GRAPHS, generate_standard_graph, validate_standard_graph
-from graph_styles import copy_style, paste_style, set_overrides, set_edge_style
+from graph_styles import copy_style, paste_style, set_overrides, set_edge_style, set_palette_style
 from graph_style_ui import PropertiesDialog, StylesDialog
 
 
@@ -201,10 +203,11 @@ class CollapsibleTabWidget(QTabWidget):
 
 
 class GraphBuilderQt(QMainWindow):
-    def __init__(self, graph=None, path=None, actions=()):
+    def __init__(self, graph=None, path=None, actions=(), return_graph_on_close=False):
         super().__init__()
         self.graph = graph if graph is not None else empty_graph()
         self.path = Path(path) if path is not None else None
+        self.return_graph_on_close = return_graph_on_close
         self.custom_actions = tuple(actions)
         if any(not isinstance(action, Action) for action in self.custom_actions):
             raise TypeError('Custom actions must be graph_builder_lib.Action values')
@@ -215,7 +218,8 @@ class GraphBuilderQt(QMainWindow):
         self.selection = SelectionState()
         self.clipboard = None
         self.style_clipboard = None
-        self.grid_mode = None
+        self.grid_mode = 'axis'
+        self.axis_auto_snap = True
         self.grid_origin = QPointF(0, 0)
         self.grid_unit = DEFAULT_GRID_PRECISION
         self.radial_divisions = 5
@@ -235,6 +239,7 @@ class GraphBuilderQt(QMainWindow):
         self._info_outdated = False
         self._last_live_layout = 0.0
         self._live_drag_changed = False
+        self._active_style_dialog = None
 
         self.setWindowTitle('Graph Builder')
         self.resize(1160, 800)
@@ -258,7 +263,7 @@ class GraphBuilderQt(QMainWindow):
         self.view.centerOn(self.grid_origin)
         self._basic_moves_completed = set()
         self.onboarding_hint = QLabel(
-            'Click to create/select/move; secondary-drag vertices for edges; Alt-drag to pan.', self)
+            'Click to create/select/move · Secondary-drag for edges and lasso selection · Alt-drag to pan.', self)
         self.statusBar().addWidget(self.onboarding_hint, 1)
         self.statusBar().messageChanged.connect(self._sync_status_bar_visibility)
         self.update_actions()
@@ -293,6 +298,7 @@ class GraphBuilderQt(QMainWindow):
 
     def _display_info(self, kind, scope, lines):
         self.info_text.setPlainText(f'{kind} · {scope}\n\n' + '\n'.join(lines))
+        self.help_dock.hide()
         self.info_dock.show()
         self._info_has_result = True
         self._info_outdated = False
@@ -338,6 +344,7 @@ class GraphBuilderQt(QMainWindow):
             self._display_info(kind, scope, analyze(graph, kind))
             return
         self.info_text.setPlainText(f'{kind} · {scope}\n\nCalculating…')
+        self.help_dock.hide()
         self.info_dock.show()
         process = QProcess(self)
         process.setWorkingDirectory(str(Path(__file__).resolve().parent))
@@ -398,7 +405,9 @@ class GraphBuilderQt(QMainWindow):
                       else sequence.toString(QKeySequence.NativeText))
                      for sequence in action.shortcuts() if not sequence.isEmpty()]
         suffix = f' — {", ".join(shortcuts)}' if shortcuts else ''
-        action.setToolTip(f'{action.text().replace("&", "")}{suffix}')
+        description = action.property('description')
+        detail = f'\n{description}' if description else ''
+        action.setToolTip(f'{action.text().replace("&", "")}{suffix}{detail}')
 
     def _build_actions(self):
         self.new_action = self._action('New', self.new_file, QKeySequence.New)
@@ -422,17 +431,17 @@ class GraphBuilderQt(QMainWindow):
         self._set_action_tooltip(self.delete_action)
         self.rename_action = self._action('Rename…', self.rename_selection)
         self.properties_action = self._action('Properties…', self.edit_selection_properties)
-        self.styles_action = self._action('Shared styles…', self.edit_shared_styles)
+        self.styles_action = self._action('Type styles…', self.edit_shared_styles)
         self.copy_style_action = self._action('Copy style', self.copy_selected_style, 'Ctrl+Shift+C')
         self.paste_style_action = self._action('Paste style', self.paste_selected_style, 'Ctrl+Shift+V')
         self.addAction(self.copy_style_action)
         self.addAction(self.paste_style_action)
         self.deselect_action = self._action('Deselect', self.deselect, 'Escape')
 
-        self.add_curve_action = self._action('Curve point', self.add_curve_point, 'A')
+        self.add_curve_action = self._action('Curve point', self.add_curve_point)
         self.previous_type_action = self._action('Previous type', lambda: self.change_type(-1), 'Shift+T')
         self.next_type_action = self._action('Next type', lambda: self.change_type(1), 'T')
-        self.cut_action = self._action('Vertex cut', self.cut_edges, 'C')
+        self.cut_action = self._action('Cut', self.cut_edges, 'C')
         self.fit_action = self._action('Fit graph', self.fit_graph, 'Space')
 
         self.arrange_action = self._action('Arrange', self.arrange_graph)
@@ -446,19 +455,24 @@ class GraphBuilderQt(QMainWindow):
         self.labels_action.setChecked(labels_visible(self.graph))
         self.directed_action = self._action('Directed', self.set_directed, checkable=True)
         self.directed_action.setChecked(self.is_directed)
-        self.grid_off_action = self._action('No grid', lambda: self.set_grid(None), checkable=True)
+        self.grid_off_action = self._action('No guides', lambda: self.set_grid(None), checkable=True)
         self.grid_square_action = self._action('Square grid', lambda: self.set_grid(None if self.grid_mode == 'square' else 'square'), checkable=True)
         self.grid_triangular_action = self._action('Triangular grid', lambda: self.set_grid(None if self.grid_mode == 'triangular' else 'triangular'), checkable=True)
         self.grid_radial_action = self._action('Radial grid', lambda: self.set_grid(None if self.grid_mode == 'radial' else 'radial'), checkable=True)
+        self.grid_axis_action = self._action('Axes', lambda: self.set_grid(None if self.grid_mode == 'axis' else 'axis'), checkable=True)
+        self.axis_snap_action = self._action('Auto-snap', self.set_axis_auto_snap,
+                                             checkable=True)
         self.grid_group = QActionGroup(self)
         self.grid_group.setExclusive(True)
         for action in (self.grid_off_action, self.grid_square_action,
-                       self.grid_radial_action, self.grid_triangular_action):
+                       self.grid_radial_action, self.grid_triangular_action,
+                       self.grid_axis_action):
             self.grid_group.addAction(action)
-        self.grid_off_action.setChecked(True)
-        self.grid_down_action = self._action('Decrease grid precision (larger cells)',
+        self.grid_axis_action.setChecked(True)
+        self.axis_snap_action.setChecked(self.axis_auto_snap)
+        self.grid_down_action = self._action('Decrease grid density (larger cells)',
                                            lambda: self.change_grid_unit(2))
-        self.grid_up_action = self._action('Increase grid precision (smaller cells)',
+        self.grid_up_action = self._action('Increase grid density (smaller cells)',
                                          lambda: self.change_grid_unit(1/2))
         self.radial_down_action = self._action('Fewer radials', lambda: self.change_radials(-1))
         self.radial_up_action = self._action('More radials', lambda: self.change_radials(1))
@@ -472,11 +486,33 @@ class GraphBuilderQt(QMainWindow):
         }
         self.info_copy_action = self._action('Copy results', self.copy_graph_info)
 
+        for action, description in (
+            (self.fit_action, 'Center the whole graph in view.'),
+            (self.rename_action, 'Change the label of a vertex or edge.'),
+            (self.previous_type_action, 'Previous vertex/edge type.'),
+            (self.next_type_action, 'Next vertex/edge type.'),
+            (self.add_curve_action, 'Add a control point along the edge. Drag to reshape.'),
+            (self.cut_action, 'Disconnect the selection from the rest of the graph.'),
+            (self.axis_snap_action, 'Align vertices while dragging.'),
+            (self.grid_down_action, 'Double the spacing between grid lines or circles.'),
+            (self.grid_up_action, 'Halve the spacing between grid lines or circles.'),
+            (self.labels_action, 'Show or hide vertex and edge labels.'),
+            (self.directed_action, 'Show edges as directed arrows.'),
+            (self.arrange_action, 'Automatically arrange vertices.'),
+            (self.pin_action, 'Keep selected vertices in place when arranging.'),
+            (self.unpin_action, 'Allow selected vertices to move when arranging.'),
+            (self.styles_action, 'Edit the shared appearance of each vertex or edge type.'),
+        ):
+            action.setProperty('description', description)
+            self._set_action_tooltip(action)
+
         self.extension_actions = []
         for definition in (*self.builtin_actions, *self.custom_actions):
             qt_action = self._action(definition.display_name(self.context()),
                                      lambda checked=False, action=definition: self.run_extension(action),
                                      definition.shortcut)
+            qt_action.setProperty('description', definition.description or '')
+            self._set_action_tooltip(qt_action)
             self.extension_actions.append((definition, qt_action))
 
     def _build_controls(self):
@@ -496,6 +532,17 @@ class GraphBuilderQt(QMainWindow):
             QTabBar::tab:disabled { color: #8a8f96; }
         ''')
         self.menu_tabs = tabs
+        self.help_button = QToolButton(tabs.tabBar())
+        self.help_button.setText('?')
+        self.help_button.setToolTip('Show the controls guide')
+        self.help_button.setAccessibleName('Controls guide')
+        self.help_button.setFixedSize(25, 25)
+        self.help_button.setStyleSheet('''
+            QToolButton { color: #111111; background: #e6e7e9;
+                          border: 1px solid #c4c9ce; border-radius: 12px;
+                          font-weight: bold; font-size: 14px; }
+            QToolButton:hover { background: #d4e7e8; }
+        ''')
 
         def row(name, actions=()):
             toolbar = QToolBar(name, tabs)
@@ -503,7 +550,7 @@ class GraphBuilderQt(QMainWindow):
             toolbar.setFloatable(False)
             toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
             toolbar.setStyleSheet('''
-                QToolBar { border: 0; padding: 2px; background: #f5f6f7; }
+                QToolBar { border: 0; padding: 2px 2px 2px 8px; background: #f5f6f7; }
                 QToolBar QLabel { color: #111111; }
                 QToolBar QLabel:disabled { color: #777d84; }
                 QToolBar > QToolButton { border: 1px solid #d0d4d9; border-radius: 4px;
@@ -514,6 +561,8 @@ class GraphBuilderQt(QMainWindow):
                                                  border-color: #96b9bc; }
                 QToolBar > QToolButton:disabled { color: #777d84; background: #f1f2f3;
                                                   border-color: #777d84; }
+                QToolBar::separator { background: #c4c9ce; width: 1px;
+                                      margin: 5px 7px; }
             ''')
             toolbar.addActions(actions)
             tabs.addTab(toolbar, name)
@@ -589,8 +638,11 @@ class GraphBuilderQt(QMainWindow):
         edition_row.addActions(tuple(action for definition, action in self.extension_actions
                                      if definition.group == 'edition' and not definition.pair_id))
 
-        grid_row = row('Grid', (self.grid_off_action, self.grid_square_action,
-                                self.grid_radial_action, self.grid_triangular_action))
+        grid_row = row('Guides', (self.grid_off_action, self.grid_axis_action,
+                                self.grid_square_action, self.grid_radial_action,
+                                self.grid_triangular_action))
+        self.grid_options_separator = grid_row.addSeparator()
+        grid_row.addAction(self.axis_snap_action)
         self.grid_unit_label = QLabel(grid_row)
         self.grid_unit_label_action = grid_row.addWidget(self.grid_unit_label)
         self.grid_unit_control = StepControl(self.grid_down_action, self.grid_up_action, grid_row)
@@ -696,7 +748,10 @@ class GraphBuilderQt(QMainWindow):
 
         custom = [action for definition, action in self.extension_actions
                   if definition.group not in ('basic', 'edition')]
-        row('Custom', custom)
+        custom_row = row('Custom', custom)
+        if not custom:
+            custom_row.addWidget(QLabel('Add functions to your launch script with the @button decorator.', custom_row))
+        tabs.tabBar().setTabButton(tabs.count() - 1, QTabBar.RightSide, self.help_button)
         tabs.open_tab(0)
         layout.addWidget(tabs)
         layout.addWidget(self.view, 1)
@@ -710,6 +765,43 @@ class GraphBuilderQt(QMainWindow):
         self.info_dock.setWidget(self.info_text)
         self.addDockWidget(Qt.RightDockWidgetArea, self.info_dock)
         self.info_dock.hide()
+        self.help_dock = QDockWidget('Controls', self)
+        self.help_dock.setAllowedAreas(Qt.RightDockWidgetArea)
+        self.help_dock.setMinimumWidth(290)
+        self.help_text = QTextBrowser(self.help_dock)
+        self.help_text.setStyleSheet('QTextBrowser { color: #111111; background: #ffffff; padding: 8px; }')
+        self.help_text.setOpenExternalLinks(True)
+        self.help_text.setHtml('''
+            <h3>Quick controls</h3>
+            <p><b>Create:</b> Click empty space for a vertex. Secondary-drag
+            between vertices to add or remove an edge. Secondary-click a vertex to delete it or press Delete.</p>
+            <p><b>Select:</b> Click an object, drag a rectangle in empty space,
+            or secondary-drag there for a lasso.</p>
+            <p><b>Move and navigate:</b> Drag one or multiple vertices to move them.
+            Press Space to fit the graph in view. Alt+drag to pan. Mouse wheel to zoom.</p>
+            <p><b>Edit:</b> Double-click a vertex or edge to edit its label and style. Global styles can be edited in the Graph properties menu. Use T to change vertex style.
+            Use the Basic or Edition menu for graph operations.</p>
+            <p><small>Secondary-click means right-click, or Ctrl-click on a
+            trackpad.</small></p>
+            <h3>Essential menus</h3>
+            <p><b>File</b> saves, loads and exports.<br>
+            <b>Basic</b> has undo, selection and transformations.<br>
+            <b>Edition</b> has graph operations.<br>
+            <b>Guides</b> has various guides and grids for consistent layout positioning.<br>
+            <b>Graph properties</b> has labels and styles.<br>
+            <b>Standard graphs</b> inserts familiar graph families.<br>
+            <b>Layout</b> arranges vertices.<br>
+            <b>Info</b> Computes metrics of the graph.<br>
+            <b>Custom</b> Buttons added by your script.</p>
+            <h3>About</h3>
+            <p>Created by Cyril Pujol.<br>
+            <a href="https://github.com/CyrilPujol/graph-builder">GitHub</a> ·
+            <a href="https://www.irif.fr/~cpujol/">Webpage</a></p>
+        ''')
+        self.help_dock.setWidget(self.help_text)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.help_dock)
+        self.help_dock.hide()
+        self.help_button.clicked.connect(self.toggle_help)
         # Actions in inactive tabs still need their keyboard shortcuts active.
         for action in (self.new_action, self.open_action, self.save_action, self.save_as_action,
                        self.close_action, self.undo_action, self.redo_action, self.copy_action,
@@ -723,17 +815,26 @@ class GraphBuilderQt(QMainWindow):
                 self.addAction(action)
         self._sync_controls()
 
+    def toggle_help(self):
+        if self.help_dock.isVisible():
+            self.help_dock.hide()
+        else:
+            self.info_dock.hide()
+            self.help_dock.show()
+
     def _sync_controls(self):
         self.labels_action.setChecked(labels_visible(self.graph))
         self.directed_action.setChecked(self.is_directed)
         self.vertex_colors_label.setText(f'  Vertex types: {self.graph.graph.get("num_vertex_colors", 4)} ')
         self.edge_colors_label.setText(f'  Edge types: {self.graph.graph.get("num_edge_colors", 2)} ')
-        self.grid_unit_label.setText('  Grid precision: ')
+        self.grid_unit_label.setText('  Grid density: ')
         self.radial_label.setText(f'  Radials: {self.radial_divisions} ')
-        self.grid_unit_label_action.setVisible(self.grid_mode is not None)
+        self.grid_unit_label_action.setVisible(self.grid_mode in ('square', 'triangular', 'radial'))
         self.radial_label_action.setVisible(self.grid_mode == 'radial')
-        self.grid_unit_control_action.setVisible(self.grid_mode is not None)
+        self.grid_unit_control_action.setVisible(self.grid_mode in ('square', 'triangular', 'radial'))
         self.radial_control_action.setVisible(self.grid_mode == 'radial')
+        self.axis_snap_action.setVisible(self.grid_mode == 'axis')
+        self.grid_options_separator.setVisible(self.grid_mode is not None)
 
     def _change_standard_graph(self):
         self.standard_parameter_stack.setCurrentIndex(self.standard_graph_choice.currentIndex())
@@ -782,7 +883,6 @@ class GraphBuilderQt(QMainWindow):
         viewport = self.view.viewport()
         pixels_per_unit = min(85.0, .75 * viewport.width() / max(width, 1),
                               .75 * viewport.height() / max(height, 1))
-        pixels_per_unit = max(44.0, pixels_per_unit)
         scene_per_unit = pixels_per_unit / self.view.transform().m11()
         center = self.view.mapToScene(viewport.rect().center())
         index = 0
@@ -853,6 +953,9 @@ class GraphBuilderQt(QMainWindow):
             self.selection = selection
         self.selection.prune(self.graph)
         self._rebuilding = True
+        self.scene.set_edge_hover_target(None)
+        self.scene.clear_fusion_animation()
+        self.scene.set_axis_snap_guides(())
         self.scene.clear()
         self.node_items.clear()
         self.edge_items.clear()
@@ -903,7 +1006,11 @@ class GraphBuilderQt(QMainWindow):
         if self.graph.number_of_nodes() > 350:
             self.report('Arrange is limited to 350 vertices to keep the editor responsive.')
             return False
-        positions = arrange_positions(self.graph, movable)
+        visible = self.view.mapToScene(self.view.viewport().rect()).boundingRect()
+        positions = arrange_positions(
+            self.graph, movable,
+            center=(visible.center().x(), visible.center().y()),
+            fit_size=(visible.width() * .75, visible.height() * .75))
         self._set_layout_positions(positions, rebuild=True)
         self.commit_change()
         return True
@@ -945,7 +1052,7 @@ class GraphBuilderQt(QMainWindow):
 
     def add_node(self, position):
         node = unused_label(self.graph)
-        if self.grid_mode:
+        if self.grid_mode in ('square', 'triangular', 'radial'):
             position = QPointF(*nearest_grid_point((position.x(), position.y()), self.grid_mode,
                                                    self.grid_origin.toTuple(), self.grid_unit,
                                                    self.radial_divisions))
@@ -960,7 +1067,14 @@ class GraphBuilderQt(QMainWindow):
         self.commit_change()
 
     def finish_pointer_change(self):
-        if self.grid_mode:
+        if self.grid_mode == 'axis' and self.axis_auto_snap:
+            moving = {node: self.node_items[node] for node in self.selection.nodes
+                      if node in self.node_items}
+            offsets, _ = self.axis_snap_plan(moving)
+            if offsets != (0.0, 0.0):
+                for item in moving.values():
+                    item.setPos(item.pos() + QPointF(*offsets))
+        elif self.grid_mode in ('square', 'triangular', 'radial'):
             for node in self.selection.nodes:
                 item = self.node_items.get(node)
                 if item:
@@ -968,8 +1082,48 @@ class GraphBuilderQt(QMainWindow):
                                                  self.grid_origin.toTuple(), self.grid_unit,
                                                  self.radial_divisions)
                     item.setPos(*snapped)
+        self.scene.set_axis_snap_guides(())
         self._update_curve_handles()
         self.commit_change()
+
+    def axis_snap_plan(self, moving_nodes, include_endpoints=False):
+        if self.grid_mode != 'axis' or not self.axis_auto_snap or not moving_nodes:
+            result = ((0.0, 0.0), ())
+            return (*result, ()) if include_endpoints else result
+        moving = [(node, self.node_items[node]) for node in moving_nodes
+                  if node in self.node_items]
+        viewport = self.view.viewport().rect()
+        moving_ids = {node for node, _ in moving}
+        references = [(node, item) for node, item in self.node_items.items()
+                      if node not in moving_ids and
+                      viewport.contains(self.view.mapFromScene(item.pos()))]
+        visible = self.view.mapToScene(viewport).boundingRect()
+        vertical_visible = visible.left() <= 0 <= visible.right()
+        horizontal_visible = visible.top() <= 0 <= visible.bottom()
+        plan = axis_alignment_plan(
+            [item.pos().toTuple() for _, item in moving],
+            [item.pos().toTuple() for _, item in references],
+            self.view.transform().m11(),
+            axis_visible=(vertical_visible, horizontal_visible),
+            origin_visible=vertical_visible and horizontal_visible,
+            include_matches=include_endpoints)
+        if not include_endpoints:
+            return plan
+        offsets, guides, matches = plan
+        endpoints = []
+        for guide, (moved_index, reference_index) in zip(guides, matches):
+            nodes = {moving[moved_index][0]}
+            if reference_index is not None and reference_index < len(references):
+                nodes.add(references[reference_index][0])
+            else:
+                nodes.update(node for node, item in references
+                             if item.pos().toTuple() == guide[0])
+            endpoints.append(frozenset(nodes))
+        return offsets, guides, tuple(endpoints)
+
+    def preview_axis_snap(self, moving_nodes):
+        _, guides, endpoints = self.axis_snap_plan(moving_nodes, include_endpoints=True)
+        self.scene.set_axis_snap_guides(guides, endpoints)
 
     def rename_node(self, node):
         from PySide6.QtWidgets import QInputDialog
@@ -1004,23 +1158,30 @@ class GraphBuilderQt(QMainWindow):
     def edit_node_properties(self, node):
         nodes = ([n for n in self.graph if n in self.selection.nodes]
                  if node in self.selection.nodes and len(self.selection.nodes) > 1 else [node])
-        dialog = PropertiesDialog(self.graph, 'vertex',
+        source_graph = self.graph
+        editor = PropertiesDialog(self.graph, 'vertex',
                                   [dict(self.graph.nodes[n], label=vertex_label(self.graph, n))
                                    for n in nodes],
                                   bulk=len(nodes) > 1, parent=self)
-        if dialog.exec() != QDialog.Accepted:
+        editor.accepted.connect(lambda: self._apply_node_properties(editor, nodes, source_graph))
+        self._show_style_editor(editor)
+        return editor
+
+    def _apply_node_properties(self, dialog, nodes, source_graph):
+        if self.graph is not source_graph or any(node not in self.graph for node in nodes):
+            self.report('Graph changed. Reopen vertex properties.', 4)
             return
+        node = nodes[0]
         changes = dialog.changes()
-        preset = dialog.preset_change()
+        if dialog.shared_style_update is not None:
+            index, style = dialog.shared_style_update
+            set_palette_style(self.graph, 'vertex', index, style)
         for current, color in zip(nodes, dialog.type_values()):
             attributes = self.graph.nodes[current]
             attributes['col'] = color
             set_overrides(attributes, changes)
-            if preset is not None:
-                if preset:
-                    attributes['style_preset'] = preset
-                else:
-                    attributes.pop('style_preset', None)
+            if dialog.clear_preset():
+                attributes.pop('style_preset', None)
         if dialog.label_edit is not None and dialog.label_edit.text() != vertex_label(self.graph, node):
             self.graph.nodes[node]['label'] = dialog.label_edit.text()
         self.rebuild_scene()
@@ -1032,16 +1193,28 @@ class GraphBuilderQt(QMainWindow):
                  if any(self.edge_key(edge.source, edge.target) == selected
                         for edge in self.selection.edges) and len(self.selection.edges) > 1
                  else [(source, target)])
-        dialog = PropertiesDialog(self.graph, 'edge',
+        source_graph = self.graph
+        editor = PropertiesDialog(self.graph, 'edge',
                                   [self.graph.edges[pair] for pair in edges],
                                   bulk=len(edges) > 1, parent=self)
-        if dialog.exec() != QDialog.Accepted:
+        editor.accepted.connect(lambda: self._apply_edge_properties(editor, edges, source_graph))
+        self._show_style_editor(editor)
+        return editor
+
+    def _apply_edge_properties(self, dialog, edges, source_graph):
+        if self.graph is not source_graph or any(not self.graph.has_edge(*pair) for pair in edges):
+            self.report('Graph changed. Reopen edge properties.', 4)
             return
+        source, target = edges[0]
+        if dialog.shared_style_update is not None:
+            index, style = dialog.shared_style_update
+            set_palette_style(self.graph, 'edge', index, style)
         for (first, second), color in zip(edges, dialog.type_values()):
             self.graph.edges[first, second]['col'] = color
             if not self.graph.is_directed() and self.graph.has_edge(second, first):
                 self.graph.edges[second, first]['col'] = color
-            set_edge_style(self.graph, first, second, dialog.changes(), dialog.preset_change())
+            set_edge_style(self.graph, first, second, dialog.changes(),
+                           '' if dialog.clear_preset() else None)
         if dialog.label_edit is not None:
             set_edge_label(self.graph, source, target, dialog.label_edit.text())
         self.rebuild_scene()
@@ -1055,11 +1228,35 @@ class GraphBuilderQt(QMainWindow):
             self.edit_edge_properties(edge.source, edge.target)
 
     def edit_shared_styles(self):
-        dialog = StylesDialog(self.graph, self)
-        if dialog.exec() == QDialog.Accepted:
-            self.graph = dialog.graph
-            self.rebuild_scene()
-            self.commit_change()
+        source_graph = self.graph
+        editor = StylesDialog(self.graph, self)
+        editor.accepted.connect(lambda: self._apply_type_styles(editor, source_graph))
+        self._show_style_editor(editor)
+        return editor
+
+    def _show_style_editor(self, editor):
+        """Show a normal parented dialog without starting a nested event loop."""
+        self._active_style_dialog = editor
+        editor.setWindowModality(Qt.ApplicationModal)
+        editor.finished.connect(lambda result: self._release_style_editor(editor))
+        editor.show()
+
+    def _release_style_editor(self, editor):
+        if self._active_style_dialog is editor:
+            self._active_style_dialog = None
+        editor.deleteLater()
+
+    def _apply_type_styles(self, dialog, source_graph):
+        if self.graph is not source_graph:
+            self.report('Graph changed. Reopen Type styles.', 4)
+            return
+        for key in ('vertex_styles', 'edge_styles'):
+            if key in dialog.graph.graph:
+                self.graph.graph[key] = copy.deepcopy(dialog.graph.graph[key])
+            else:
+                self.graph.graph.pop(key, None)
+        self.rebuild_scene()
+        self.commit_change()
 
     def copy_selected_style(self):
         if len(self.selection.nodes) == 1 and not self.selection.edges:
@@ -1109,8 +1306,7 @@ class GraphBuilderQt(QMainWindow):
             if item is None:
                 continue
             points = _edge_curve_points(self.graph, edge.source, edge.target)
-            position = item.path().pointAtPercent(.5)
-            index = self._curve_insertion_index(item, points, position)
+            position, index = self._next_curve_point(item, points)
             points.insert(index, position.toTuple())
             _set_edge_curve_points(self.graph, edge.source, edge.target, points)
             first = first or (edge.source, edge.target, index)
@@ -1118,6 +1314,40 @@ class GraphBuilderQt(QMainWindow):
         if len(self.selection.edges) == 1 and first is not None:
             self._select_curve_handle(*first)
         self.commit_change()
+
+    @staticmethod
+    def _next_curve_point(item, points):
+        """Split the longest stretch of the visible path between controls."""
+        path = item.path()
+        elements = [path.elementAt(index) for index in range(path.elementCount())]
+        distances = [0.0]
+        for first, second in zip(elements, elements[1:]):
+            distances.append(distances[-1] +
+                             ((second.x - first.x) ** 2 + (second.y - first.y) ** 2) ** .5)
+
+        def distance_at(path_position):
+            index = min(int(path_position), len(elements) - 2)
+            fraction = path_position - index
+            return distances[index] + fraction * (distances[index + 1] - distances[index])
+
+        boundaries = [0.0]
+        if len(points) == 1:
+            _, path_position = item.closest_path_position(QPointF(*points[0]))
+            boundaries.append(distance_at(path_position))
+        elif len(points) > 1:
+            steps_per_span = (len(elements) - 1) / (len(points) + 1)
+            boundaries.extend(distance_at((index + 1) * steps_per_span)
+                              for index in range(len(points)))
+        boundaries.append(distances[-1])
+        insertion_index = max(range(len(boundaries) - 1),
+                              key=lambda index: boundaries[index + 1] - boundaries[index])
+        middle = (boundaries[insertion_index] + boundaries[insertion_index + 1]) / 2
+        segment = min(max(0, bisect_right(distances, middle) - 1), len(elements) - 2)
+        span = distances[segment + 1] - distances[segment]
+        fraction = (middle - distances[segment]) / span if span else 0.0
+        start, end = elements[segment], elements[segment + 1]
+        return (QPointF(start.x + fraction * (end.x - start.x),
+                        start.y + fraction * (end.y - start.y)), insertion_index)
 
     @staticmethod
     def _curve_insertion_index(item, points, position):
@@ -1176,7 +1406,7 @@ class GraphBuilderQt(QMainWindow):
             if isinstance(hovered, NodeItem):
                 data = self.graph.nodes[hovered.node]
                 data['col'] = (data.get('col', 0) + delta) % self.graph.graph['num_vertex_colors']
-                hovered.update()
+                self.rebuild_scene()
                 self.commit_change()
                 return
             self.vertex_color = (self.vertex_color + delta) % self.graph.graph['num_vertex_colors']
@@ -1253,7 +1483,7 @@ class GraphBuilderQt(QMainWindow):
         self.vertex_color %= count
         for _, data in self.graph.nodes(data=True):
             data['col'] = data.get('col', 0) % count
-        self.scene.update()
+        self.rebuild_scene()
         self._sync_controls()
         self.commit_change()
 
@@ -1267,14 +1497,22 @@ class GraphBuilderQt(QMainWindow):
 
     def set_grid(self, mode):
         self.grid_mode = mode
+        self.scene.set_axis_snap_guides(())
         for action, active in ((self.grid_off_action, mode is None),
                                (self.grid_square_action, mode == 'square'),
                                (self.grid_radial_action, mode == 'radial'),
-                               (self.grid_triangular_action, mode == 'triangular')):
+                               (self.grid_triangular_action, mode == 'triangular'),
+                               (self.grid_axis_action, mode == 'axis')):
             action.setChecked(active)
         self._sync_controls()
         self.scene.update()
         self.update_actions()
+
+    def set_axis_auto_snap(self, checked):
+        self.axis_auto_snap = bool(checked)
+        self.axis_snap_action.setChecked(self.axis_auto_snap)
+        if not checked:
+            self.scene.set_axis_snap_guides(())
 
     def change_grid_unit(self, factor):
         minimum = COORDINATE_UNIT / 64
@@ -1305,6 +1543,9 @@ class GraphBuilderQt(QMainWindow):
             if self.view.transform().m11() > 1:
                 self.view.resetTransform()
                 self.view.centerOn(bounds.center())
+        else:
+            self.view.resetTransform()
+            self.view.centerOn(0, 0)
 
     def run_extension(self, definition):
         context = self.context()
@@ -1312,12 +1553,16 @@ class GraphBuilderQt(QMainWindow):
         # document, nor leave its selection pointing at deleted vertices.
         context.graph = copy.deepcopy(self.graph)
         context.selection = copy.deepcopy(self.selection)
+        old_nodes = set(self.graph)
         if not execute_action(definition, context):
             return
         self.graph = context.graph
         self.selection = context.selection
         self.rebuild_scene()
         self.commit_change()
+        if definition.id == 'builtin:fuse':
+            self.scene.show_fusion_animation(
+                self.graph.nodes[node]['position'] for node in self.graph if node not in old_nodes)
 
     def update_actions(self):
         if not hasattr(self, 'extension_actions'):
@@ -1355,8 +1600,9 @@ class GraphBuilderQt(QMainWindow):
             self.live_layout_action.setToolTip('Available for graphs with at most 200 vertices')
         self.radial_down_action.setEnabled(self.grid_mode == 'radial' and self.radial_divisions > 2)
         self.radial_up_action.setEnabled(self.grid_mode == 'radial' and self.radial_divisions < 99)
-        self.grid_down_action.setEnabled(self.grid_mode is not None and self.grid_unit < COORDINATE_UNIT * 16)
-        self.grid_up_action.setEnabled(self.grid_mode is not None and self.grid_unit > COORDINATE_UNIT / 64)
+        has_precision = self.grid_mode in ('square', 'triangular', 'radial')
+        self.grid_down_action.setEnabled(has_precision and self.grid_unit < COORDINATE_UNIT * 16)
+        self.grid_up_action.setEnabled(has_precision and self.grid_unit > COORDINATE_UNIT / 64)
         vertex_colors = self.graph.graph['num_vertex_colors']
         edge_colors = self.graph.graph['num_edge_colors']
         if self.scene.edge_sources:
@@ -1524,7 +1770,9 @@ class GraphBuilderQt(QMainWindow):
             self.report(f'Exported {path.name}', 3)
 
     def closeEvent(self, event):
-        if self.path is not None and _serialize_graph(self.graph) != self._saved_state:
+        if self.return_graph_on_close and self.path is None:
+            event.accept()
+        elif self.path is not None and _serialize_graph(self.graph) != self._saved_state:
             if self.save_file():
                 event.accept()
             else:
@@ -1553,6 +1801,31 @@ def launch(actions=(), graph_file=None, **options):
     if graph.number_of_nodes():
         window.fit_graph()
     return app.exec()
+
+
+def edit_graph_window(graph=None, *, actions=()):
+    """Run a file-optional editor session for the public edit_graph API."""
+    import networkx as nx
+    from graph_builder_custom import normalize_graph, public_graph
+
+    source = nx.Graph() if graph is None else graph
+    if not isinstance(source, nx.Graph):
+        raise TypeError('edit_graph expects a NetworkX Graph or DiGraph.')
+    if source.is_multigraph():
+        raise ValueError('Parallel edges are not supported by the editor.')
+    initial = empty_graph(graph_type='digraph' if source.is_directed() else 'graph')
+    for key in ('num_vertex_colors', 'num_edge_colors', 'show_labels'):
+        if key in source.graph:
+            initial.graph[key] = source.graph[key]
+    normalized, _ = normalize_graph(source, initial)
+
+    app = QApplication.instance() or QApplication([])
+    window = GraphBuilderQt(normalized, actions=actions, return_graph_on_close=True)
+    window.show()
+    if normalized.number_of_nodes():
+        window.fit_graph()
+    app.exec()
+    return public_graph(window.graph)
 
 
 if __name__ == '__main__':

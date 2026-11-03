@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from math import ceil, cos, hypot, pi, sin
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QPolygonF, QTransform
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QInputDevice, QPainter, QPainterPath, QPen, QPolygonF, QTransform
 from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsItem, QGraphicsPathItem, QGraphicsScene, QGraphicsView
 
 from graph_builder_lib import (
-    _edge_curve_points, _set_edge_curve_points, colormap_1, edge_label, flip_edge,
+    _edge_curve_points, _set_edge_curve_points, edge_label, flip_edge,
     edge_samples, labels_visible, radial_grid_divisions, radial_grid_new_spokes,
     triangular_grid_lines,
     vertex_label,
@@ -76,11 +76,11 @@ class NodeItem(QGraphicsItem):
     def boundingRect(self):
         style = effective_style(self.window.graph, 'vertex', self.window.graph.nodes[self.node])
         radius = NODE_RADIUS if style['shape'] == 'none' else max(NODE_RADIUS, float(style['size']) / 2)
-        width = 2 * radius + 10
+        width = 2 * radius + 20
         if labels_visible(self.window.graph):
             label = vertex_label(self.window.graph, self.node)
             width = max(width, QFontMetricsF(_label_font(13)).horizontalAdvance(label) + 10)
-        return QRectF(-width / 2, -radius - 6, width, 2 * radius + 12)
+        return QRectF(-width / 2, -radius - 10, width, 2 * radius + 20)
 
     def shape(self):
         shape = QPainterPath()
@@ -129,6 +129,15 @@ class NodeItem(QGraphicsItem):
                                 2 if self.isSelected() else 1, Qt.DashLine))
             painter.drawEllipse(QPointF(0, 0), max(radius + 4, NODE_RADIUS),
                                 max(radius + 4, NODE_RADIUS))
+        if self.window.scene.edge_hover_target == self.node:
+            cue = QColor(SELECTION_COLOR)
+            cue.setAlpha(160)
+            pen = QPen(cue, 2)
+            pen.setCosmetic(True)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(pen)
+            painter.drawEllipse(QPointF(0, 0), max(radius + 8, NODE_RADIUS + 8),
+                                max(radius + 8, NODE_RADIUS + 8))
         if self.window.graph.nodes[self.node].get(PIN_ATTRIBUTE):
             painter.setPen(QPen(QColor('#353b41'), 1.5))
             painter.setBrush(QColor('#f5f6f7'))
@@ -347,6 +356,7 @@ class GraphScene(QGraphicsScene):
         self.edge_chain_added = False
         self.edge_last_auto_node = None
         self.edge_trackpad_path = False
+        self.edge_hover_target = None
         self.pressed_item = None
         self.pressed_item_was_selected = False
         self.press_position = None
@@ -355,6 +365,13 @@ class GraphScene(QGraphicsScene):
         self.press_selection_mode = 'replace'
         self.selection_was_empty = True
         self.positions_before_drag = {}
+        self.axis_snap_guides = ()
+        self.axis_snap_guide_endpoints = ()
+        self.fusion_marks = ()
+        self.fusion_frame = 0
+        self._fusion_timer = QTimer(self)
+        self._fusion_timer.setInterval(35)
+        self._fusion_timer.timeout.connect(self._advance_fusion_animation)
         self._live_relax_timer = QTimer(self)
         self._live_relax_timer.setInterval(50)
         self._live_relax_timer.timeout.connect(self._relax_held_vertex)
@@ -370,6 +387,47 @@ class GraphScene(QGraphicsScene):
         if self.positions_before_drag:
             self.window.relax_dragged_neighbors(self.positions_before_drag)
 
+    def set_axis_snap_guides(self, guides, endpoints=None):
+        guides = tuple(guides)
+        endpoints = (tuple(frozenset(nodes) for nodes in endpoints)
+                     if endpoints is not None else tuple(frozenset() for _ in guides))
+        if len(endpoints) != len(guides):
+            raise ValueError('Each alignment guide needs one endpoint set')
+        if guides == self.axis_snap_guides and endpoints == self.axis_snap_guide_endpoints:
+            return
+        self.axis_snap_guides = guides
+        self.axis_snap_guide_endpoints = endpoints
+        self.update()
+
+    def set_edge_hover_target(self, node):
+        if node == self.edge_hover_target:
+            return
+        previous = self.edge_hover_target
+        self.edge_hover_target = node
+        for target in (previous, node):
+            item = self.window.node_items.get(target)
+            if item is not None:
+                item.update()
+
+    def show_fusion_animation(self, positions):
+        self.fusion_marks = tuple(QPointF(float(x), float(y)) for x, y in positions)
+        self.fusion_frame = 0
+        if self.fusion_marks:
+            self._fusion_timer.start()
+            self.update()
+
+    def clear_fusion_animation(self):
+        self._fusion_timer.stop()
+        self.fusion_marks = ()
+        self.update()
+
+    def _advance_fusion_animation(self):
+        self.fusion_frame += 1
+        if self.fusion_frame >= 9:
+            self.clear_fusion_animation()
+        else:
+            self.update()
+
     def drawBackground(self, painter, rect):
         painter.fillRect(rect, QColor('#fcfcfd'))
         mode = self.window.grid_mode
@@ -377,6 +435,13 @@ class GraphScene(QGraphicsScene):
             return
         unit = self.window.grid_unit
         origin = self.window.grid_origin
+        if mode == 'axis':
+            painter.setPen(QPen(BOLD_GRID_COLOR, 2))
+            painter.drawLine(QPointF(origin.x(), rect.top()),
+                             QPointF(origin.x(), rect.bottom()))
+            painter.drawLine(QPointF(rect.left(), origin.y()),
+                             QPointF(rect.right(), origin.y()))
+            return
         if mode == 'square':
             left = ceil((rect.left()-origin.x())/unit)
             right = ceil((rect.right()-origin.x())/unit)
@@ -454,11 +519,48 @@ class GraphScene(QGraphicsScene):
         painter.drawEllipse(origin, 2, 2)
 
     def drawForeground(self, painter, rect):
+        if self.fusion_marks:
+            painter.save()
+            progress = self.fusion_frame / 9
+            color = QColor(SELECTION_COLOR)
+            color.setAlpha(round(105 * (1 - progress)))
+            pen = QPen(color, 2)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            radius = NODE_RADIUS + 7 + 10 * progress
+            for position in self.fusion_marks:
+                painter.drawEllipse(position, radius, radius)
+            painter.restore()
+        if self.axis_snap_guides:
+            painter.save()
+            pen = QPen(SELECTION_COLOR, 3)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            for (start, end), endpoints in zip(
+                    self.axis_snap_guides, self.axis_snap_guide_endpoints):
+                clip = QPainterPath()
+                clip.addRect(rect)
+                for node in endpoints:
+                    item = self.window.node_items.get(node)
+                    if item is not None:
+                        clip = clip.subtracted(item.mapToScene(item.shape()))
+                painter.setClipPath(clip)
+                painter.drawLine(_point(start), _point(end))
+            painter.restore()
         if self.edge_sources and self.edge_position is not None:
-            color = QColor(*colormap_1(self.window.edge_color))
-            painter.setPen(QPen(color, EDGE_STROKE_WIDTH, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            style = effective_style(self.window.graph, 'edge', {'col': self.window.edge_color})
+            pattern = {'solid': Qt.SolidLine, 'dash': Qt.DashLine,
+                       'dot': Qt.DotLine, 'dashdot': Qt.DashDotLine}.get(
+                           style['pattern'], Qt.SolidLine)
+            opacity = float(style['opacity'])
+            painter.setOpacity(opacity if opacity else 1.0)
+            painter.setPen(QPen(QColor(style['stroke'] if opacity else '#c5cbd0'),
+                                float(style['width']), pattern if opacity else Qt.DotLine,
+                                Qt.RoundCap, Qt.RoundJoin))
             for source in self.edge_sources:
                 painter.drawLine(self.window.node_items[source].pos(), self.edge_position)
+            painter.setOpacity(1.0)
         if len(self.lasso_points) > 1:
             painter.setPen(QPen(SELECTION_COLOR, 2, Qt.DashLine))
             path = QPainterPath(self.lasso_points[0])
@@ -471,6 +573,7 @@ class GraphScene(QGraphicsScene):
             painter.drawRect(self.rubber_rect)
 
     def cancel_edge_creation(self):
+        self.set_edge_hover_target(None)
         self.edge_sources = ()
         self.edge_position = None
         self.edge_drag_active = False
@@ -537,6 +640,8 @@ class GraphScene(QGraphicsScene):
 
     def mousePressEvent(self, event):
         self._live_relax_timer.stop()
+        if self.axis_snap_guides:
+            self.set_axis_snap_guides(())
         self.window.last_canvas_position = event.scenePos()
         item = self.itemAt(event.scenePos(), QTransform())
         self.pressed_item = item
@@ -645,6 +750,10 @@ class GraphScene(QGraphicsScene):
                         self.edge_last_auto_node = target.node
                 if not isinstance(self.itemAt(event.scenePos(), QTransform()), NodeItem):
                     self.edge_last_auto_node = None
+                hovered = self.itemAt(event.scenePos(), QTransform())
+                self.set_edge_hover_target(
+                    hovered.node if isinstance(hovered, NodeItem)
+                    and any(source != hovered.node for source in self.edge_sources) else None)
                 self.edge_position = event.scenePos()
                 self.update()
             event.accept()
@@ -664,6 +773,9 @@ class GraphScene(QGraphicsScene):
                     for node, position in self.positions_before_drag.items()
                     if node in self.window.node_items):
                 self.window.relax_dragged_neighbors(self.positions_before_drag)
+                self.window.preview_axis_snap(self.positions_before_drag)
+            elif self.axis_snap_guides:
+                self.set_axis_snap_guides(())
             return
         if self.edge_drag_active:
             self.edge_position = event.scenePos()
@@ -686,6 +798,8 @@ class GraphScene(QGraphicsScene):
 
     def mouseReleaseEvent(self, event):
         self._live_relax_timer.stop()
+        if self.axis_snap_guides:
+            self.set_axis_snap_guides(())
         self.window.last_canvas_position = event.scenePos()
         if (self.press_screen_position is not None
                 and (event.screenPos() - self.press_screen_position).manhattanLength()
@@ -727,9 +841,9 @@ class GraphScene(QGraphicsScene):
                         self.window.mark_basic_move('create_edge')
             elif trackpad_path:
                 _apply_selection(self, (item,), selection_mode)
-            elif (self.selection_was_empty and selection_mode == 'replace'):
+            elif selection_mode == 'replace':
                 self.window.graph.remove_node(item.node)
-                self.window.selection.clear()
+                self.window.selection.nodes.discard(item.node)
                 self.window.rebuild_scene()
                 self.window.commit_change()
             else:
@@ -928,15 +1042,46 @@ class GraphView(QGraphicsView):
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event):
-        self.zoom_by_delta(event.angleDelta().y(), event.position())
+        # Keep wheel mice zooming. A touchpad scroll pans in both directions,
+        # while a native pinch is handled separately by viewportEvent.
+        pixels = event.pixelDelta()
+        angles = event.angleDelta()
+        touchpad = (event.device() is not None and
+                    event.device().type() == QInputDevice.DeviceType.TouchPad)
+        if touchpad and not event.modifiers() & Qt.ControlModifier:
+            if not pixels.isNull():
+                self.pan_by_pixels(pixels.x(), pixels.y())
+            else:
+                self.pan_by_pixels(angles.x() / 2, angles.y() / 2)
+        elif angles.y():
+            self.zoom_by_delta(angles.y(), event.position())
+        elif angles.x():
+            self.pan_by_pixels(angles.x() / 2, 0)
         event.accept()
+
+    def viewportEvent(self, event):
+        if (event.type() == QEvent.NativeGesture and
+                event.gestureType() == Qt.ZoomNativeGesture):
+            self.zoom_by_factor(1 + event.value(), event.position())
+            event.accept()
+            return True
+        return super().viewportEvent(event)
+
+    def pan_by_pixels(self, x, y):
+        self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - round(x))
+        self.verticalScrollBar().setValue(self.verticalScrollBar().value() - round(y))
 
     def zoom_by_delta(self, delta, viewport_position):
         """Apply symmetric exponential zoom around a viewport point."""
         if not delta:
             return
+        self.zoom_by_factor(2 ** (float(delta) * 1.5 / 800.0), viewport_position)
+
+    def zoom_by_factor(self, factor, viewport_position):
+        """Scale the view around a pointer, regardless of the input device."""
+        if factor <= 0:
+            return
         current = self.transform().m11()
-        factor = 2 ** (float(delta) * 1.5 / 800.0)
         target = max(0.08, min(12.0, current * factor))
         factor = target / current
         viewport_point = viewport_position.toPoint()

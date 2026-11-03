@@ -33,19 +33,31 @@ class GraphInfoTests(unittest.TestCase):
         graph = nx.Graph()
         graph.add_nodes_from((0, 1))
         self.assertEqual(analyze(graph, 'Distances'),
-                         ['Diameter: ∞ (disconnected)', 'Mean shortest-path length: ∞'])
+                         ['Diameter: ∞ (disconnected)', 'Radius: ∞',
+                          'Mean shortest-path length: ∞'])
         directed = nx.DiGraph([(0, 1)])
         self.assertIn('Diameter: ∞ (not strongly connected)', analyze(directed, 'Distances'))
+        self.assertIn('Radius: ∞', analyze(directed, 'Distances'))
         self.assertIn('Mean shortest-path length: ∞', analyze(directed, 'Distances'))
         self.assertEqual(analyze(nx.Graph(), 'Distances')[0], 'Diameter: — (empty graph)')
+        self.assertEqual(analyze(nx.path_graph(1), 'Distances'),
+                         ['Diameter: 0', 'Radius: 0', 'Mean shortest-path length: 0.000'])
 
     def test_exact_and_sampled_distances(self):
         self.assertEqual(analyze(nx.path_graph(5), 'Distances'),
-                         ['Diameter: 4', 'Mean shortest-path length: 2.000'])
+                         ['Diameter: 4', 'Radius: 2', 'Mean shortest-path length: 2.000'])
         lines = analyze(nx.path_graph(125), 'Distances')
         self.assertIn('Diameter: ≥ 124', lines[0])
-        self.assertIn('≈', lines[1])
-        self.assertIn('24 sampled sources', lines[1])
+        self.assertTrue(lines[1].startswith('Radius: ≤ '))
+        self.assertIn('≈', lines[2])
+        self.assertIn('24 sampled sources', lines[2])
+        self.assertEqual(len(lines), 3)
+
+    def test_directed_radius_uses_outgoing_distances(self):
+        graph = nx.DiGraph([(0, 1), (1, 2), (2, 0), (2, 1)])
+        lines = analyze(graph, 'Distances')
+        self.assertIn('Radius: 1', lines)
+        self.assertIn('Diameter: 2', lines)
 
     def test_structure_and_bounds_keep_their_meaning(self):
         cycle = nx.cycle_graph(5)
@@ -58,7 +70,7 @@ class GraphInfoTests(unittest.TestCase):
         lines = analyze(nx.complete_graph(4), 'Bounds')
         self.assertIn('Clique number ω: ≥ 4', lines[0])
         self.assertIn('Independence number α: ≥ 1', lines[1])
-        self.assertEqual(lines[2], 'Chromatic number χ: 4')
+        self.assertEqual(lines[2], 'Chromatic number: 4 ≤ χ ≤ 4')
         directed = nx.DiGraph([(0, 1), (1, 0)])
         self.assertIn('Strong components: 1 (largest: 2)', analyze(directed, 'Structure'))
         self.assertTrue(analyze(directed, 'Structure')[-1].startswith('Bipartite'))

@@ -4,6 +4,7 @@ The public graph is an ordinary NetworkX graph; conversion and validation are
 kept here rather than spread between user scripts and the window class.
 """
 import copy
+import inspect
 import json
 import math
 
@@ -147,18 +148,31 @@ def normalize_graph(result, original, center=(0, 0), orientations=None):
 
 
 def button(name=None, *, shortcut=None, selection=None):
-    """Register a normal function; @button, @button('Name'), or @button(...).
+    """Add a function as a button in the Custom menu.
 
-    selection=None passes graph only; 'vertex', 'vertices', and 'edge' pass a
-    second argument. 'vertices' passes an empty set when nothing is selected.
-    Annotations are documentation, not runtime type requirements.
-    """
+Use @button, @button('Button name'), or
+@button('Button name', shortcut='G', selection='vertex').
+
+The decorator's `name` sets the button text, `shortcut` sets its keyboard
+shortcut, and `selection` determines what the decorated function receives.
+
+The decorated function always receives a NetworkX graph as its first
+argument: nx.Graph for an undirected document, nx.DiGraph for a directed one.
+It may modify that graph in place and return None, or return a graph.
+
+With selection='vertex', its second argument is one vertex ID.
+With selection='vertices', it is a (possibly empty) set of vertex IDs.
+With selection='edge', it is a (source, target) pair.
+Without `selection`, the function receives only the graph.
+"""
     from graph_builder_lib import Action, selected_vertices
     if selection not in (None, 'vertex', 'vertices', 'edge'):
         raise ValueError("selection must be None, 'vertex', 'vertices', or 'edge'.")
 
     def decorate(function):
         title = name if isinstance(name, str) else function.__name__.replace('_', ' ').capitalize()
+        documentation = inspect.getdoc(function)
+        description = documentation.splitlines()[0] if documentation else None
 
         def available(context):
             if selection == 'vertex':
@@ -192,7 +206,7 @@ def button(name=None, *, shortcut=None, selection=None):
             context.selection.prune(normalized)
 
         function.__graph_button__ = Action(f'button:{function.__module__}.{function.__name__}', title,
-                                          shortcut, invoke, available)
+                                          shortcut, invoke, available, description=description)
         return function
 
     return decorate(name) if callable(name) else decorate

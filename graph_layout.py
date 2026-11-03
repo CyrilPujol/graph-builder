@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
-from math import cos, pi, sin
+from math import cos, hypot, pi, sin
 
 import networkx as nx
 
@@ -66,7 +66,54 @@ def relaxed_neighborhood_positions(graph, dragged):
     return result
 
 
-def arrange_positions(graph, movable, iterations=80, spacing=110.0):
+def _spring_without_numpy(graph, positions, movable, iterations, spacing):
+    """Small deterministic fallback for NetworkX's optional NumPy layout."""
+    positions = {node: list(point) for node, point in positions.items()}
+    nodes = list(graph)
+    edges = list(graph.edges)
+    span = max(max(point[axis] for point in positions.values()) -
+               min(point[axis] for point in positions.values()) for axis in (0, 1))
+    initial_temperature = max(10.0, span * .1)
+    for iteration in range(iterations):
+        movement = {node: [0.0, 0.0] for node in movable}
+        for index, source in enumerate(nodes):
+            for target in nodes[index + 1:]:
+                if source not in movable and target not in movable:
+                    continue
+                dx = positions[source][0] - positions[target][0]
+                dy = positions[source][1] - positions[target][1]
+                distance = max(.01, hypot(dx, dy))
+                force = spacing**2 / distance**2
+                if source in movable:
+                    movement[source][0] += dx * force
+                    movement[source][1] += dy * force
+                if target in movable:
+                    movement[target][0] -= dx * force
+                    movement[target][1] -= dy * force
+        for source, target in edges:
+            dx = positions[source][0] - positions[target][0]
+            dy = positions[source][1] - positions[target][1]
+            distance = max(.01, hypot(dx, dy))
+            force = distance / spacing
+            if source in movable:
+                movement[source][0] -= dx * force
+                movement[source][1] -= dy * force
+            if target in movable:
+                movement[target][0] += dx * force
+                movement[target][1] += dy * force
+        temperature = initial_temperature * (1 - iteration / max(1, iterations))
+        for node in movable:
+            dx, dy = movement[node]
+            length = hypot(dx, dy)
+            if length:
+                step = min(length, temperature) / length
+                positions[node][0] += dx * step
+                positions[node][1] += dy * step
+    return positions
+
+
+def arrange_positions(graph, movable, iterations=80, spacing=110.0,
+                      center=None, fit_size=None):
     """Return positions for movable nodes, preserving all other positions exactly.
 
     Starting from the drawing makes repeated use predictable. A stable small
@@ -78,7 +125,8 @@ def arrange_positions(graph, movable, iterations=80, spacing=110.0):
         return {}
     positions = {node: tuple(map(float, graph.nodes[node]['position'])) for node in graph}
     if len(positions) < 2:
-        return {node: positions[node] for node in movable}
+        return {node: tuple(center) if center is not None else positions[node]
+                for node in movable}
 
     layout_graph = nx.Graph()
     layout_graph.add_nodes_from(graph)
@@ -97,9 +145,13 @@ def arrange_positions(graph, movable, iterations=80, spacing=110.0):
             x += 4 * count * cos(angle)
             y += 4 * count * sin(angle)
         initial[node] = (x, y)
-    result = nx.spring_layout(layout_graph, pos=initial, fixed=list(fixed) or None,
-                              iterations=iterations, k=spacing, scale=None,
-                              weight=None, seed=0)
+    try:
+        result = nx.spring_layout(layout_graph, pos=initial, fixed=list(fixed) or None,
+                                  iterations=iterations, k=spacing, scale=None,
+                                  weight=None, seed=0)
+    except ImportError:
+        result = _spring_without_numpy(layout_graph, initial, movable,
+                                       iterations, spacing)
     if not fixed:
         before_center = (sum(p[0] for p in positions.values()) / len(positions),
                          sum(p[1] for p in positions.values()) / len(positions))
@@ -109,5 +161,19 @@ def arrange_positions(graph, movable, iterations=80, spacing=110.0):
                   before_center[1] - after_center[1])
     else:
         offset = (0, 0)
-    return {node: (float(result[node][0] + offset[0]),
-                   float(result[node][1] + offset[1])) for node in movable}
+    arranged = {node: (float(result[node][0] + offset[0]),
+                       float(result[node][1] + offset[1])) for node in movable}
+    if not fixed and (center is not None or fit_size is not None):
+        source_center = (sum(point[0] for point in arranged.values()) / len(arranged),
+                         sum(point[1] for point in arranged.values()) / len(arranged))
+        destination = tuple(center) if center is not None else source_center
+        scale = 1.0
+        if fit_size is not None:
+            xs = [point[0] for point in arranged.values()]
+            ys = [point[1] for point in arranged.values()]
+            scale = min(1.0, fit_size[0] / max(max(xs) - min(xs), 1.0),
+                        fit_size[1] / max(max(ys) - min(ys), 1.0))
+        arranged = {node: (destination[0] + (point[0] - source_center[0]) * scale,
+                           destination[1] + (point[1] - source_center[1]) * scale)
+                    for node, point in arranged.items()}
+    return arranged
