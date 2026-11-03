@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import random
 import sys
+from pathlib import Path
 
 import networkx as nx
 
@@ -178,11 +179,12 @@ def graph_from_payload(payload):
     return graph
 
 
-def _worker():
-    kind = sys.argv[2]
-    graph = graph_from_payload(json.load(sys.stdin))
-    json.dump(analyze(graph, kind), sys.stdout)
+def worker_from_files(kind, input_path, output_path):
+    """Run a bounded analysis without console streams in a windowed app."""
+    payload = json.loads(Path(input_path).read_text(encoding='utf-8'))
+    result = analyze(graph_from_payload(payload), kind)
+    Path(output_path).write_text(json.dumps(result), encoding='utf-8')
 
 
-if __name__ == '__main__' and len(sys.argv) == 3 and sys.argv[1] == '--worker':
-    _worker()
+if __name__ == '__main__' and len(sys.argv) == 5 and sys.argv[1] == '--worker':
+    worker_from_files(sys.argv[2], sys.argv[3], sys.argv[4])

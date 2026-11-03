@@ -5,7 +5,7 @@ import json
 from copy import deepcopy
 from math import hypot
 
-from graph_builder_lib import colormap_1
+from .lib import colormap_1
 
 
 FIELDS = {

@@ -13,5 +13,9 @@ dependencies = [
     "PySide6-Essentials>=6.8",
 ]
 
+[project.optional-dependencies]
+build = ["pyinstaller>=6.15"]
+
 [tool.setuptools]
-py-modules = ["graph_builder", "graph_builder_lib", "graph_builder_custom", "graph_builder_qt", "graph_builder_qt_canvas", "graph_style_ui", "graph_styles", "graph_info", "graph_layout", "standard_graphs", "tikz_export"]
+py-modules = ["graph_builder", "graph_builder_lib", "tikz_export"]
+packages = ["graph_builder_core"]

@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QColorDialog, QComboBox, QDialog, QDialogButtonBo
     QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
-from graph_styles import (FIELDS, effective_style,
+from .styles import (FIELDS, effective_style,
                           contrast_text_color, reset_palette_style,
                           set_overrides, set_palette_style)
 

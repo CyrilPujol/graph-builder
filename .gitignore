@@ -5,6 +5,9 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+.DS_Store
+# Personal development files stay on this computer.
+local/
 
 # Default files created by an editor session
 graph.graphml

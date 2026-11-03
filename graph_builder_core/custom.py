@@ -13,7 +13,7 @@ import networkx as nx
 
 def discover_buttons(namespace):
     """Discover explicitly registered buttons, preserving definition order."""
-    from graph_builder_lib import Action
+    from .lib import Action
     actions, seen = [], set()
     for value in namespace.values():
         action = value if isinstance(value, Action) else getattr(value, '__graph_button__', None)
@@ -45,7 +45,7 @@ def _point(value, description):
 
 def public_graph(graph):
     """Copy the document without exposing paired undirected arcs."""
-    from graph_builder_lib import logical_edges
+    from .lib import logical_edges
     result = nx.Graph() if graph.graph.get('graph_type') == 'graph' else nx.DiGraph()
     result.graph.update(copy.deepcopy(graph.graph))
     result.add_nodes_from(copy.deepcopy(list(graph.nodes(data=True))))
@@ -54,9 +54,67 @@ def public_graph(graph):
     return result
 
 
+def integer_key_input(graph):
+    """Prepare an API graph for editing while retaining existing integer keys."""
+    occupied = {node for node in graph if type(node) is int}
+    mapping = {}
+    candidate = 0
+    for node in graph:
+        if type(node) is int:
+            identifier = node
+        else:
+            while candidate in occupied:
+                candidate += 1
+            identifier = candidate
+            occupied.add(identifier)
+            candidate += 1
+        mapping[node] = str(identifier)
+    result = nx.relabel_nodes(graph, mapping, copy=True)
+    for node, identifier in mapping.items():
+        if type(node) is not int and 'label' not in result.nodes[identifier]:
+            result.nodes[identifier]['label'] = str(node)
+    return result
+
+
+def integer_key_output(graph):
+    """Return a graph whose keys are all integers, including newly added nodes."""
+    def canonical_integer(node):
+        if type(node) is int:
+            return node
+        if not isinstance(node, str):
+            return None
+        try:
+            integer = int(node)
+        except ValueError:
+            return None
+        return integer if str(integer) == node else None
+
+    mapping = {}
+    occupied = set()
+    for node in graph:
+        integer = canonical_integer(node)
+        if integer is not None:
+            mapping[node] = integer
+            occupied.add(integer)
+    candidate = 0
+    for node in graph:
+        if node in mapping:
+            continue
+        while candidate in occupied:
+            candidate += 1
+        mapping[node] = candidate
+        occupied.add(candidate)
+        candidate += 1
+    result = nx.relabel_nodes(graph, mapping, copy=True)
+    for node, identifier in mapping.items():
+        if 'label' not in result.nodes[identifier]:
+            result.nodes[identifier]['label'] = str(node)
+    return result
+
+
 def normalize_graph(result, original, center=(0, 0), orientations=None):
     """Validate a public result and supply editor attributes, without mutation."""
-    from graph_builder_lib import DEFAULT_GRAPH_OPTIONS, empty_graph, unused_label, _set_edge_curve_points
+    from .lib import DEFAULT_GRAPH_OPTIONS, empty_graph, unused_label, _set_edge_curve_points
     if not isinstance(result, nx.Graph):
         raise TypeError('Return a NetworkX Graph/DiGraph, or return None after editing the graph in place. '
                         f'Received {type(result).__name__}.')
@@ -165,7 +223,7 @@ With selection='vertices', it is a (possibly empty) set of vertex IDs.
 With selection='edge', it is a (source, target) pair.
 Without `selection`, the function receives only the graph.
 """
-    from graph_builder_lib import Action, selected_vertices
+    from .lib import Action, selected_vertices
     if selection not in (None, 'vertex', 'vertices', 'edge'):
         raise ValueError("selection must be None, 'vertex', 'vertices', or 'edge'.")
 

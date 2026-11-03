@@ -1,8 +1,8 @@
 """Qt application shell for Graph Builder.
 
-The graph model and custom actions live in ``graph_builder_lib`` and
-``graph_builder.py``. Canvas rendering and pointer gestures live in
-``graph_builder_qt_canvas``. This module owns menus, controls, history and files.
+The graph model and built-in actions live in ``lib``. Custom button
+registration lives in ``custom``. Canvas rendering and pointer gestures live
+in ``qt_canvas``. This module owns menus, controls, history and files.
 """
 from __future__ import annotations
 
@@ -10,12 +10,13 @@ import argparse
 import copy
 import json
 import sys
+import tempfile
 import time
 from bisect import bisect_right
 from math import sqrt
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QPointF, QProcess, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QPoint, QPointF, QProcess, QRectF, QSize, QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QColor, QCursor, QIcon, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFrame,
@@ -24,7 +25,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QTextBrowser, QTextEdit, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
-from graph_builder_lib import (
+from .lib import (
     Action, EdgeRef, EditorContext, SelectionState, _deserialize_graph,
     _edge_curve_points, _serialize_graph, _set_edge_curve_points,
     axis_alignment_plan, builtin_editor_actions, convert_from_file, copy_graph_selection,
@@ -33,18 +34,23 @@ from graph_builder_lib import (
     paste_graph_selection, set_directed, set_edge_label, unused_label,
     vertex_label, write_graph_file,
 )
-from graph_builder_qt_canvas import (
+from .qt_canvas import (
     COORDINATE_UNIT, DEFAULT_GRID_PRECISION, CurveHandle, EdgeItem, GraphScene,
     GraphView, NodeItem,
 )
-from graph_builder_custom import public_graph
-from graph_layout import (PIN_ATTRIBUTE, arrange_positions, movable_vertices,
+from .custom import public_graph
+from .layout import (PIN_ATTRIBUTE, arrange_positions, movable_vertices,
                           pinned_vertices, relaxed_neighborhood_positions)
-from graph_info import ANALYSIS_TIMEOUT_MS, analyze, topology_payload
-from tikz_export import write_tikz
-from standard_graphs import STANDARD_GRAPHS, generate_standard_graph, validate_standard_graph
-from graph_styles import copy_style, paste_style, set_overrides, set_edge_style, set_palette_style
-from graph_style_ui import PropertiesDialog, StylesDialog
+from .info import ANALYSIS_TIMEOUT_MS, analyze, topology_payload
+from .tikz_export import write_tikz
+from .standard_graphs import STANDARD_GRAPHS, generate_standard_graph, validate_standard_graph
+from .styles import copy_style, paste_style, set_overrides, set_edge_style, set_palette_style
+from .style_ui import PropertiesDialog, StylesDialog
+
+
+def _documents_folder():
+    location = QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation)
+    return Path(location) if location else Path.home()
 
 
 class MessageSurface:
@@ -146,11 +152,11 @@ class StepControl(QWidget):
             button.setToolTip(action.toolTip())
             button.clicked.connect(action.trigger)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setContentsMargins(4, 3, 4, 3)
         layout.setSpacing(0)
         layout.addWidget(self.decrease)
         layout.addWidget(self.increase)
-        self.setFixedSize(56, 28)
+        self.setFixedSize(60, 30)
         self.setStyleSheet('''
             StepControl { border: 1px solid #7f858b; border-radius: 5px; }
             StepControl QToolButton { border: 0; border-radius: 3px; background: #e4e6e9;
@@ -210,7 +216,7 @@ class GraphBuilderQt(QMainWindow):
         self.return_graph_on_close = return_graph_on_close
         self.custom_actions = tuple(actions)
         if any(not isinstance(action, Action) for action in self.custom_actions):
-            raise TypeError('Custom actions must be graph_builder_lib.Action values')
+            raise TypeError('Custom actions must be Graph Builder Action values')
         self.builtin_actions = builtin_editor_actions()
         self.node_items = {}
         self.edge_items = {}
@@ -311,6 +317,7 @@ class GraphBuilderQt(QMainWindow):
             self._info_process = None
             process.kill()
             process.waitForFinished(100)
+            self._release_info_process(process)
             self.info_text.setPlainText('Graph info\n\nOutdated — graph or selection changed. Run again.')
             self._info_has_result = True
             self._info_outdated = True
@@ -335,8 +342,10 @@ class GraphBuilderQt(QMainWindow):
         self._info_request_id += 1
         request_id = self._info_request_id
         if self._info_process is not None:
-            self._info_process.kill()
-            self._info_process.waitForFinished(100)
+            previous = self._info_process
+            previous.kill()
+            previous.waitForFinished(100)
+            self._release_info_process(previous)
             self._info_process = None
         self._info_has_result = False
         self.info_copy_action.setEnabled(False)
@@ -347,30 +356,45 @@ class GraphBuilderQt(QMainWindow):
         self.help_dock.hide()
         self.info_dock.show()
         process = QProcess(self)
-        process.setWorkingDirectory(str(Path(__file__).resolve().parent))
+        worker_dir = tempfile.TemporaryDirectory(prefix='graph-builder-info-')
+        process._worker_dir = worker_dir
+        input_path = Path(worker_dir.name) / 'input.json'
+        process._result_path = Path(worker_dir.name) / 'result.json'
+        input_path.write_text(json.dumps(topology_payload(graph)), encoding='utf-8')
         self._info_process = process
-        payload = json.dumps(topology_payload(graph)).encode('utf-8')
-        process.started.connect(lambda: (process.write(payload), process.closeWriteChannel()))
         process.finished.connect(lambda exit_code, exit_status: self._finish_graph_info(
             request_id, process, kind, scope, exit_code))
         process.errorOccurred.connect(lambda error: self._graph_info_process_error(
             request_id, process, kind, scope, error))
-        process.start(sys.executable, ['-m', 'graph_info', '--worker', kind])
+        if getattr(sys, 'frozen', False):
+            arguments = ['--graph-info-worker', kind, str(input_path), str(process._result_path)]
+        else:
+            arguments = ['-m', 'graph_builder_core.info', '--worker', kind,
+                         str(input_path), str(process._result_path)]
+        process.start(sys.executable, arguments)
         QTimer.singleShot(ANALYSIS_TIMEOUT_MS,
                           lambda: self._timeout_graph_info(request_id, process, kind, scope))
+
+    @staticmethod
+    def _release_info_process(process):
+        worker_dir = getattr(process, '_worker_dir', None)
+        if worker_dir is not None:
+            worker_dir.cleanup()
+            process._worker_dir = None
 
     def _finish_graph_info(self, request_id, process, kind, scope, exit_code):
         if request_id == self._info_request_id and self._info_process is process:
             self._info_process = None
             if exit_code == 0:
                 try:
-                    lines = json.loads(bytes(process.readAllStandardOutput()).decode('utf-8'))
-                except (UnicodeDecodeError, json.JSONDecodeError):
+                    lines = json.loads(process._result_path.read_text(encoding='utf-8'))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
                     lines = ['Analysis returned an unreadable result.']
             else:
                 detail = bytes(process.readAllStandardError()).decode('utf-8', errors='replace').strip()
                 lines = [f'Analysis failed: {detail or "worker stopped unexpectedly"}']
             self._display_info(kind, scope, lines)
+        self._release_info_process(process)
         process.deleteLater()
 
     def _graph_info_process_error(self, request_id, process, kind, scope, error):
@@ -378,6 +402,7 @@ class GraphBuilderQt(QMainWindow):
                 and error == QProcess.FailedToStart):
             self._info_process = None
             self._display_info(kind, scope, ['Could not start the analysis process.'])
+            self._release_info_process(process)
             process.deleteLater()
 
     def _timeout_graph_info(self, request_id, process, kind, scope):
@@ -387,6 +412,7 @@ class GraphBuilderQt(QMainWindow):
         self._info_process = None
         process.kill()
         process.waitForFinished(100)
+        self._release_info_process(process)
         self._display_info(kind, scope,
                            [f'Not computed within {ANALYSIS_TIMEOUT_MS / 1000:g} seconds.'])
 
@@ -455,7 +481,8 @@ class GraphBuilderQt(QMainWindow):
         self.labels_action.setChecked(labels_visible(self.graph))
         self.directed_action = self._action('Directed', self.set_directed, checkable=True)
         self.directed_action.setChecked(self.is_directed)
-        self.grid_off_action = self._action('No guides', lambda: self.set_grid(None), checkable=True)
+        self.grid_off_action = self._action('Manual', lambda: self.set_grid(None), checkable=True)
+        self.grid_automatic_action = self._action('Automatic', lambda: self.set_grid(None if self.grid_mode == 'automatic' else 'automatic'), checkable=True)
         self.grid_square_action = self._action('Square grid', lambda: self.set_grid(None if self.grid_mode == 'square' else 'square'), checkable=True)
         self.grid_triangular_action = self._action('Triangular grid', lambda: self.set_grid(None if self.grid_mode == 'triangular' else 'triangular'), checkable=True)
         self.grid_radial_action = self._action('Radial grid', lambda: self.set_grid(None if self.grid_mode == 'radial' else 'radial'), checkable=True)
@@ -464,7 +491,7 @@ class GraphBuilderQt(QMainWindow):
                                              checkable=True)
         self.grid_group = QActionGroup(self)
         self.grid_group.setExclusive(True)
-        for action in (self.grid_off_action, self.grid_square_action,
+        for action in (self.grid_off_action, self.grid_automatic_action, self.grid_square_action,
                        self.grid_radial_action, self.grid_triangular_action,
                        self.grid_axis_action):
             self.grid_group.addAction(action)
@@ -638,10 +665,14 @@ class GraphBuilderQt(QMainWindow):
         edition_row.addActions(tuple(action for definition, action in self.extension_actions
                                      if definition.group == 'edition' and not definition.pair_id))
 
-        grid_row = row('Guides', (self.grid_off_action, self.grid_axis_action,
+        grid_row = row('Layout', (self.grid_off_action, self.grid_automatic_action,
+                                self.grid_axis_action,
                                 self.grid_square_action, self.grid_radial_action,
                                 self.grid_triangular_action))
         self.grid_options_separator = grid_row.addSeparator()
+        self.automatic_actions = (self.arrange_action, self.pin_action, self.unpin_action,
+                                  self.clear_pins_action, self.live_layout_action)
+        grid_row.addActions(self.automatic_actions)
         grid_row.addAction(self.axis_snap_action)
         self.grid_unit_label = QLabel(grid_row)
         self.grid_unit_label_action = grid_row.addWidget(self.grid_unit_label)
@@ -678,9 +709,6 @@ class GraphBuilderQt(QMainWindow):
         self.edge_colors_control = StepControl(self.edge_colors_down_action,
                                                 self.edge_colors_up_action, properties_row)
         properties_row.addWidget(self.edge_colors_control)
-
-        row('Layout', (self.arrange_action, self.pin_action, self.unpin_action,
-                       self.clear_pins_action, self.live_layout_action))
 
         info_row = row('Info', tuple(self.info_actions.values()))
         self.info_scope = QComboBox(info_row)
@@ -750,7 +778,10 @@ class GraphBuilderQt(QMainWindow):
                   if definition.group not in ('basic', 'edition')]
         custom_row = row('Custom', custom)
         if not custom:
-            custom_row.addWidget(QLabel('Add functions to your launch script with the @button decorator.', custom_row))
+            custom_row.addWidget(QLabel(
+                'This app has no custom buttons. Add your own by running a short Python script.',
+                custom_row))
+            custom_row.addAction(self._action('How to add functions', self.show_custom_help))
         tabs.tabBar().setTabButton(tabs.count() - 1, QTabBar.RightSide, self.help_button)
         tabs.open_tab(0)
         layout.addWidget(tabs)
@@ -787,12 +818,15 @@ class GraphBuilderQt(QMainWindow):
             <p><b>File</b> saves, loads and exports.<br>
             <b>Basic</b> has undo, selection and transformations.<br>
             <b>Edition</b> has graph operations.<br>
-            <b>Guides</b> has various guides and grids for consistent layout positioning.<br>
+            <b>Layout</b> has manual, automatic, and guided positioning.<br>
             <b>Graph properties</b> has labels and styles.<br>
             <b>Standard graphs</b> inserts familiar graph families.<br>
-            <b>Layout</b> arranges vertices.<br>
             <b>Info</b> Computes metrics of the graph.<br>
-            <b>Custom</b> Buttons added by your script.</p>
+            <b>Custom</b> shows functions added by your Python script.</p>
+            <a name="custom-buttons"></a><h3>Add your own functions</h3>
+            <p>The downloaded app does not load personal Python code. To add custom
+            functions, install the library and launch it from your own script.
+            See <a href="https://github.com/CyrilPujol/graph-builder#custom-python-functions">the Custom Python functions guide</a> for setup and examples.</p>
             <h3>About</h3>
             <p>Created by Cyril Pujol.<br>
             <a href="https://github.com/CyrilPujol/graph-builder">GitHub</a> ·
@@ -822,6 +856,11 @@ class GraphBuilderQt(QMainWindow):
             self.info_dock.hide()
             self.help_dock.show()
 
+    def show_custom_help(self):
+        self.info_dock.hide()
+        self.help_dock.show()
+        self.help_text.scrollToAnchor('custom-buttons')
+
     def _sync_controls(self):
         self.labels_action.setChecked(labels_visible(self.graph))
         self.directed_action.setChecked(self.is_directed)
@@ -834,7 +873,10 @@ class GraphBuilderQt(QMainWindow):
         self.grid_unit_control_action.setVisible(self.grid_mode in ('square', 'triangular', 'radial'))
         self.radial_control_action.setVisible(self.grid_mode == 'radial')
         self.axis_snap_action.setVisible(self.grid_mode == 'axis')
-        self.grid_options_separator.setVisible(self.grid_mode is not None)
+        for action in self.automatic_actions:
+            action.setVisible(self.grid_mode == 'automatic')
+        self.grid_options_separator.setVisible(self.grid_mode in
+                                               ('automatic', 'axis', 'square', 'triangular', 'radial'))
 
     def _change_standard_graph(self):
         self.standard_parameter_stack.setCurrentIndex(self.standard_graph_choice.currentIndex())
@@ -1497,8 +1539,11 @@ class GraphBuilderQt(QMainWindow):
 
     def set_grid(self, mode):
         self.grid_mode = mode
+        if mode != 'automatic':
+            self.live_layout_action.setChecked(False)
         self.scene.set_axis_snap_guides(())
         for action, active in ((self.grid_off_action, mode is None),
+                               (self.grid_automatic_action, mode == 'automatic'),
                                (self.grid_square_action, mode == 'square'),
                                (self.grid_radial_action, mode == 'radial'),
                                (self.grid_triangular_action, mode == 'triangular'),
@@ -1587,14 +1632,15 @@ class GraphBuilderQt(QMainWindow):
         movable = movable_vertices(self.graph, self.selection.nodes)
         pins = pinned_vertices(self.graph)
         size = self.graph.number_of_nodes()
-        self.arrange_action.setEnabled(bool(movable) and size <= 350)
+        self.arrange_action.setEnabled(self.grid_mode == 'automatic' and bool(movable)
+                                       and size <= 350)
         self.arrange_action.setText('Arrange selection' if self.selection.nodes else 'Arrange graph')
         self.arrange_action.setToolTip('Available for graphs with at most 350 vertices'
                                        if size > 350 else self.arrange_action.text())
         self.pin_action.setEnabled(bool(self.selection.nodes - pins))
         self.unpin_action.setEnabled(bool(self.selection.nodes & pins))
         self.clear_pins_action.setEnabled(bool(pins))
-        self.live_layout_action.setEnabled(size <= 200)
+        self.live_layout_action.setEnabled(self.grid_mode == 'automatic' and size <= 200)
         if size > 200:
             self.live_layout_action.setChecked(False)
             self.live_layout_action.setToolTip('Available for graphs with at most 200 vertices')
@@ -1711,7 +1757,7 @@ class GraphBuilderQt(QMainWindow):
     def open_file(self):
         if not self._may_replace_document():
             return
-        filename, _ = QFileDialog.getOpenFileName(self, 'Open graph', str(self.path.parent if self.path else Path.cwd()),
+        filename, _ = QFileDialog.getOpenFileName(self, 'Open graph', str(self.path.parent if self.path else _documents_folder()),
                                                    'GraphML files (*.graphml);;All files (*)')
         if filename:
             try:
@@ -1740,7 +1786,7 @@ class GraphBuilderQt(QMainWindow):
         return True
 
     def save_as(self):
-        proposed = str(self.path if self.path else Path.cwd() / 'graph.graphml')
+        proposed = str(self.path if self.path else _documents_folder() / 'graph.graphml')
         filename, _ = QFileDialog.getSaveFileName(self, 'Save graph', proposed,
                                                    'GraphML files (*.graphml);;All files (*)')
         if not filename:
@@ -1755,7 +1801,7 @@ class GraphBuilderQt(QMainWindow):
         return False
 
     def export_tikz(self):
-        proposed = str((self.path or Path.cwd() / 'graph.graphml').with_suffix('.tex'))
+        proposed = str((self.path or _documents_folder() / 'graph.graphml').with_suffix('.tex'))
         filename, _ = QFileDialog.getSaveFileName(self, 'Export to TikZ', proposed,
                                                    'TikZ files (*.tex);;All files (*)')
         if filename:
@@ -1783,19 +1829,27 @@ class GraphBuilderQt(QMainWindow):
             event.ignore()
         if event.isAccepted() and self._info_process is not None:
             self._info_request_id += 1
-            self._info_process.kill()
-            self._info_process.waitForFinished(100)
+            process = self._info_process
+            process.kill()
+            process.waitForFinished(100)
+            self._release_info_process(process)
             self._info_process = None
 
 
-def launch(actions=(), graph_file=None, **options):
+def launch(actions=(), graph_file=None, *, untitled=False, **options):
     app = QApplication.instance() or QApplication(sys.argv)
-    path = Path(graph_file) if graph_file is not None else Path.cwd() / 'graph.graphml'
-    try:
-        graph = convert_from_file(path, options)
-    except Exception as error:
-        QMessageBox.critical(None, 'Could not open graph', str(error))
-        return 1
+    if untitled and graph_file is not None:
+        raise ValueError('Choose either graph_file or untitled=True.')
+    if untitled:
+        path = None
+        graph = empty_graph(**options)
+    else:
+        path = Path(graph_file) if graph_file is not None else Path.cwd() / 'graph.graphml'
+        try:
+            graph = convert_from_file(path, options)
+        except Exception as error:
+            QMessageBox.critical(None, 'Could not open graph', str(error))
+            return 1
     window = GraphBuilderQt(graph, path, actions)
     window.show()
     if graph.number_of_nodes():
@@ -1806,13 +1860,15 @@ def launch(actions=(), graph_file=None, **options):
 def edit_graph_window(graph=None, *, actions=()):
     """Run a file-optional editor session for the public edit_graph API."""
     import networkx as nx
-    from graph_builder_custom import normalize_graph, public_graph
+    from .custom import (integer_key_input, integer_key_output,
+                                      normalize_graph, public_graph)
 
     source = nx.Graph() if graph is None else graph
     if not isinstance(source, nx.Graph):
         raise TypeError('edit_graph expects a NetworkX Graph or DiGraph.')
     if source.is_multigraph():
         raise ValueError('Parallel edges are not supported by the editor.')
+    source = integer_key_input(source)
     initial = empty_graph(graph_type='digraph' if source.is_directed() else 'graph')
     for key in ('num_vertex_colors', 'num_edge_colors', 'show_labels'):
         if key in source.graph:
@@ -1825,7 +1881,7 @@ def edit_graph_window(graph=None, *, actions=()):
     if normalized.number_of_nodes():
         window.fit_graph()
     app.exec()
-    return public_graph(window.graph)
+    return integer_key_output(public_graph(window.graph))
 
 
 if __name__ == '__main__':

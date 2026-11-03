@@ -7,14 +7,14 @@ from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QInputDevice, QPainter, QPainterPath, QPen, QPolygonF, QTransform
 from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsItem, QGraphicsPathItem, QGraphicsScene, QGraphicsView
 
-from graph_builder_lib import (
+from .lib import (
     _edge_curve_points, _set_edge_curve_points, edge_label, flip_edge,
     edge_samples, labels_visible, radial_grid_divisions, radial_grid_new_spokes,
     triangular_grid_lines,
     vertex_label,
 )
-from graph_layout import PIN_ATTRIBUTE
-from graph_styles import base_style, contrast_text_color, effective_style, vertex_boundary_distance
+from .layout import PIN_ATTRIBUTE
+from .styles import base_style, contrast_text_color, effective_style, vertex_boundary_distance
 
 NODE_RADIUS = 17
 EDGE_STROKE_WIDTH = 2.6
@@ -431,7 +431,7 @@ class GraphScene(QGraphicsScene):
     def drawBackground(self, painter, rect):
         painter.fillRect(rect, QColor('#fcfcfd'))
         mode = self.window.grid_mode
-        if mode is None:
+        if mode is None or mode == 'automatic':
             return
         unit = self.window.grid_unit
         origin = self.window.grid_origin
@@ -916,6 +916,9 @@ class GraphView(QGraphicsView):
     def __init__(self, scene):
         super().__init__(scene)
         self.setRenderHint(QPainter.Antialiasing)
+        # Windows can leave trails at item and grid boundaries when only the
+        # minimal dirty rectangles are repainted during a drag.
+        self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
         self.setMouseTracking(True)
         self.setDragMode(QGraphicsView.NoDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)

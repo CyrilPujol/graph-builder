@@ -4,33 +4,43 @@ Graph Builder is a Python graph editor built with Qt and NetworkX. It edits
 directed or undirected coloured graphs, supports curved edges, labels, grids,
 selection, undo and redo, custom graph actions, GraphML files and TikZ export.
 
-## Install and run
+## First launch: download the app
 
-Python 3.10 or newer is required. In the project folder:
+Download the archive for your computer from [Releases](https://github.com/CyrilPujol/graph-builder/releases), then extract it. These downloads include Python and the editor's dependencies. You do not need a terminal or a Python installation.
 
-```sh
-python -m venv .venv
-```
+- **macOS:** open `Graph Builder.app`. You can move it to Applications. There are separate Apple Silicon and Intel downloads.
+- **Windows:** open the extracted `Graph Builder` folder and double-click `Graph Builder.exe`. Keep the entire folder together.
+- **Linux:** extract the archive and launch the `Graph Builder` executable inside its folder. If your file manager will not launch it, run `./Graph\ Builder/Graph\ Builder` from the extracted directory.
+
+These builds are currently unsigned. Your operating system may ask you to confirm that you trust the downloaded app. On macOS, use **Open** from the app's context menu if a normal double-click is blocked. On Windows, use **More info → Run anyway** only if the publisher and download are the ones you expected. The app starts with a new untitled graph and asks where to save it.
+
+The release archives are made on their own operating systems. [Build instructions](BUILDING.md) explain how to reproduce them.
+
+## Use it as a Python library
+
+Python 3.10 or newer is required. Open a terminal and use the commands below.
 
 On macOS or Linux:
 
 ```sh
-.venv/bin/python -m pip install -e .
-.venv/bin/python graph_builder.py
+cd "/path/to/graph_builder"
+python3 -m pip install --user -e .
+python3 graph_builder.py
 ```
 
 On Windows (PowerShell):
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e .
-.\.venv\Scripts\python.exe graph_builder.py
+cd "C:\path\to\graph_builder"
+py -3 -m pip install --user -e .
+py -3 graph_builder.py
 ```
+
+Replace the path in the `cd` command with the location where you extracted or cloned the source. This installs Graph Builder for your normal Python user account, so scripts run with that Python can import `graph_builder` from any folder. If your Python installation refuses direct installs, use a virtual environment instead. Installing the downloadable app does not install the Python library.
 
 The project stays in place, so editing its Python files changes the app. Add
 `--graph path/to/drawing.graphml` to the launch command to open a specific file.
-By default, the editor opens `graph.graphml` in the current working directory,
-or creates that file when the graph is first saved. Named graphs save on close;
-an unsaved graph made with **File → New** asks before closing. File dialogs are
+Running `graph_builder.py` directly starts a clean, untitled editor without personal custom buttons. It asks where to save when you first save the drawing. Calling `main()` from your own script retains the original `graph.graphml` default in that script's working directory, unless you pass `graph_file` or `untitled=True`. An unsaved graph made with **File → New** asks before closing. File dialogs are
 supplied by Qt on macOS, Windows and Linux.
 
 To use the editor as one step in a Python program, call `edit_graph` instead of
@@ -38,7 +48,7 @@ To use the editor as one step in a Python program, call `edit_graph` instead of
 
 ```python
 import networkx as nx
-from graph_builder_lib import edit_graph
+from graph_builder import edit_graph
 
 graph = edit_graph(nx.path_graph(4))  # Draw or edit, then close the window.
 print(graph.number_of_edges())       # Continue with the edited graph.
@@ -46,19 +56,18 @@ print(graph.number_of_edges())       # Continue with the edited graph.
 
 `edit_graph()` also starts with an empty graph. It accepts an `nx.Graph` or
 `nx.DiGraph`, leaves the input untouched, and returns the currently open graph
-when its window closes. Saving a file is optional. `main()` remains the simple
+when its window closes. Returned vertex keys are integers. Input integer keys
+are preserved, while other keys are assigned fresh integers and kept as
+visible labels if no label was set. Vertices added in the editor also receive
+integer keys. Saving a file is optional. `main()` remains the simple
 launcher for a standalone editor and returns an application exit code rather
 than a graph. Both calls discover `@button` functions in the calling module.
 
-`graph_builder.py` is the file to edit for personal buttons. The editor and
-reusable graph code live in the other Python modules. The default
-`graph.graphml` and `graph.tex` are ignored by Git so a local drawing or export
-is not accidentally included in a source push. Put any drawings you intend to
-share under `examples/`.
+`graph_builder.py` is the stable import surface, not a place for personal changes. The implementation lives in `graph_builder_core/`. Copy [`examples/custom_buttons.py`](examples/custom_buttons.py) into your own project and run that copy for your own Custom buttons. If you keep personal scripts or drawings in this checkout, put them in `local/`, which Git ignores. Put drawings you intend to share under `examples/`.
 
 ## Editing
 
-The top menu row (File, Basic, Edition, Guides, Graph properties, Layout, Info,
+The top menu row (File, Basic, Edition, Layout, Graph properties, Info,
 Standard graphs, Custom) shows one compact
 row of controls for the chosen menu. Click the active menu again to collapse the
 controls completely. The small **?** button opens a quick controls guide inside
@@ -100,7 +109,8 @@ the editor. The canvas uses a single interaction mode:
   one outward-growing leaf to each selected vertex and keeps the original
   selection, so repeated presses add more children. **File** contains New,
   Open, Save, Save As, and Export to TikZ.
-  **Guides** offers square, radial or triangular grids and a radial count up to 99. Their fixed
+  **Layout** offers Manual, Automatic, Axes, and square, radial or triangular grids. Automatic
+  shows the arrangement controls without a drawing grid. The grids have a radial count up to 99. Their fixed
   origin is `(0, 0)`, one coordinate unit is four vertex diameters, and the
   default spacing is `1/4`. The + density button halves grid spacing, while −
   doubles it. Changes use exact factors of two without
@@ -138,8 +148,9 @@ the editor. The canvas uses a single interaction mode:
   and Fuse (F), which contracts selected vertices within 10 graph units of
   each other. With one vertex selected, Fuse also considers unselected vertices
   at that position. With no selection, it checks the whole graph.
-  **Custom** contains Graph coloring, Switch, Randomize, and Distance-2 colors.
-- **Layout → Arrange** applies a force-directed placement immediately. With selected
+  **Custom** shows the buttons registered by a personal Python launcher. In the
+  standalone app it contains a brief explanation instead of example buttons.
+- **Layout → Automatic → Arrange** applies a force-directed placement immediately. With selected
   vertices, only those vertices move. With no selection, all unpinned vertices
   move. A full-graph arrangement stays centered in the current view and fits
   comfortably within it. It also works without the optional NumPy package, using a pure-Python
@@ -193,7 +204,7 @@ file. GraphML save/load keeps positions, colors, labels and edge curves.
 The smallest user script is:
 
 ```python
-from graph_builder_lib import *
+from graph_builder import *
 main()
 ```
 
@@ -203,7 +214,7 @@ are discovered; helper functions are not turned into buttons.
 
 ```python
 import networkx as nx
-from graph_builder_lib import *
+from graph_builder import *
 
 @button
 def graph_coloring(graph):
@@ -244,8 +255,8 @@ Missing drawing attributes are supplied automatically:
   around the visible viewport center, without moving existing vertices.
 - New vertex colors default to black (`col=0`), visible labels to their
   NetworkX node names, and edge labels to the empty string.
-- Arbitrary hashable NetworkX node names receive collision-free string IDs.
-  Labels are separate from IDs and need not be unique.
+- Arbitrary hashable NetworkX node names receive collision-free integer IDs.
+  Labels are separate from IDs and need not be unique. Existing integer keys are preserved.
 - Numeric strings for positions and color indices are accepted. Color indices
   must be nonnegative integers; the palette grows if necessary.
 - Document settings are preserved. A custom function cannot silently change
@@ -274,21 +285,10 @@ editor attributes. `main(actions=[my_button, degree_button])` can be used instea
 of automatic discovery, including when embedding the editor in another program.
 `--graph FILE` remains supported by `main()`.
 
-The supplied `graph_builder.py` shows working custom functions you can edit
-or replace. The automated tests cover missing attributes, validation errors,
-and rollback without adding test buttons to the application.
+The supplied [`examples/custom_buttons.py`](examples/custom_buttons.py) shows a working custom function you can copy and edit. The desktop app itself does not load personal scripts or custom buttons.
 
-The reusable graph operations, built-in actions, and extension API are in
-`graph_builder_lib.py`; the decorator, graph conversion and validation are in
-`graph_builder_custom.py`. Qt canvas items
-are in `graph_builder_qt_canvas.py`, standard graph generators and layouts are
-in `standard_graphs.py`, automatic placement is in `graph_layout.py`, and
-menus/files/history are in `graph_builder_qt.py`.
-
-## Tests
-
-```sh
-.venv/bin/python -m unittest discover -s tests -v
-```
-
-On Windows, use `.\.venv\Scripts\python.exe` in place of `.venv/bin/python`.
+The public entry point is `graph_builder.py`. Its model, editor, exporters,
+layout tools and styling code live in `graph_builder_core/`. The root-level
+`graph_builder_lib.py` and `tikz_export.py` are compatibility imports for
+older scripts. `scripts/` contains the standalone app entry point and build
+tools. The downloaded app does not read files from `local/`.
