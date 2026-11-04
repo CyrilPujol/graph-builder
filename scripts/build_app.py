@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -24,6 +25,11 @@ LINUX_GRAPHICS_LIBRARIES = (
     'libEGL.so.1', 'libGL.so.1', 'libGLX.so.0',
     'libGLdispatch.so.0', 'libOpenGL.so.0', 'libGLESv2.so.2',
 )
+LINUX_HOST_LIBRARIES = {
+    # These belong to glibc and must come from the target machine.
+    'libc.so.6', 'libm.so.6', 'libpthread.so.0', 'libdl.so.2',
+    'librt.so.1', 'libutil.so.1', 'libresolv.so.2', 'libanl.so.1',
+}
 
 
 def _linux_shared_library(name, cache):
@@ -42,6 +48,46 @@ def _linux_shared_library(name, cache):
                 return path
     raise RuntimeError(f'Cannot load {name}. Install the Linux graphics '
                        'runtime libraries before building.')
+
+
+def _linux_dependencies(binary):
+    """Read the shared libraries needed by a packaged ELF binary."""
+    result = subprocess.run(['ldd', str(binary)], capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f'Cannot inspect Linux dependencies of {binary}: '
+                           f'{result.stdout}{result.stderr}')
+    for line in result.stdout.splitlines():
+        missing = re.match(r'\s*(\S+)\s+=>\s+not found', line)
+        if missing:
+            raise RuntimeError(f'{binary} needs {missing.group(1)}, which is '
+                               'not installed on the build machine.')
+        match = re.match(r'\s*(\S+)\s+=>\s+(/\S+)\s+\(', line)
+        if match:
+            yield match.group(1), Path(match.group(2))
+
+
+def _bundle_linux_dependencies(built):
+    """Include the non-glibc dependency closure of the packaged app."""
+    packaged = {path.name for path in built.rglob('*') if path.is_file()}
+    binaries = []
+    for path in built.rglob('*'):
+        if path.is_file():
+            with path.open('rb') as source:
+                if source.read(4) == b'\x7fELF':
+                    binaries.append(path)
+    destination = built / '_internal'
+    for binary in binaries:
+        for name, source in _linux_dependencies(binary):
+            if name in LINUX_HOST_LIBRARIES or name in packaged:
+                continue
+            if not source.is_file():
+                raise RuntimeError(f'Cannot bundle missing library {source}')
+            destination.mkdir(exist_ok=True)
+            target = destination / name
+            shutil.copy2(source, target)
+            packaged.add(name)
+            binaries.append(target)
+    return packaged
 
 
 def _platform_details():
@@ -99,6 +145,7 @@ def main():
     if not built.exists():
         raise RuntimeError(f'Build completed without expected output: {built}')
     if system == 'Linux':
+        present = _bundle_linux_dependencies(built)
         required = set(LINUX_GRAPHICS_LIBRARIES) | {
             'libxcb-image.so.0', 'libxcb-shape.so.0',
             'libxkbcommon-x11.so.0', 'libxcb-cursor.so.0',
@@ -106,7 +153,6 @@ def main():
             'libxcb-icccm.so.4', 'libxcb-keysyms.so.1',
             'libxcb-xkb.so.1',
         }
-        present = {path.name for path in built.rglob('*')}
         missing = required - present
         if missing:
             raise RuntimeError('Linux bundle is missing native Qt libraries: '
