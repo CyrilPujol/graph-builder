@@ -4,6 +4,8 @@ The GitHub Actions workflow builds separate archives for macOS Apple Silicon, ma
 
 To build on your own computer, use Python 3.10 or newer on the target operating system. Open a terminal and replace the example path in `cd` with your project location.
 
+On Linux, install your distribution's `libegl1` package before building. The packager needs its shared library available so it can include it in the download. The GitHub workflow also starts the finished Linux app in a clean Ubuntu container, where `libegl1` is not installed.
+
 On macOS or Linux:
 
 ```sh

@@ -65,6 +65,10 @@ def main():
     built = DIST / (NAME + '.app' if system == 'macOS' else NAME)
     if not built.exists():
         raise RuntimeError(f'Build completed without expected output: {built}')
+    if system == 'Linux' and not any(path.name == 'libEGL.so.1'
+                                     for path in built.rglob('libEGL.so.1')):
+        raise RuntimeError('Linux bundle is missing libEGL.so.1. Install libegl1 '
+                           'on the build machine before running PyInstaller.')
     extension = '.tar.gz' if system == 'Linux' else '.zip'
     destination = DIST / f'GraphBuilder-{system}-{architecture}{extension}'
     if destination.exists():
