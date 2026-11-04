@@ -20,19 +20,18 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'local/build'
 DIST = ROOT / 'local/dist'
 NAME = 'Graph Builder'
+LINUX_GRAPHICS_LIBRARIES = (
+    'libEGL.so.1', 'libGL.so.1', 'libGLX.so.0',
+    'libGLdispatch.so.0', 'libOpenGL.so.0', 'libGLESv2.so.2',
+)
 
 
-def _linux_egl_library():
-    """Find the EGL runtime on this build host for explicit PyInstaller inclusion."""
+def _linux_shared_library(name, cache):
+    """Find a loadable system library for explicit PyInstaller inclusion."""
     import ctypes
 
-    try:
-        libraries = subprocess.check_output(['ldconfig', '-p'], text=True)
-    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-        raise RuntimeError('Cannot locate libEGL.so.1. Install the Linux EGL '
-                           'runtime before building.') from exc
-    for line in libraries.splitlines():
-        match = re.match(r'\s*libEGL\.so\.1\s+\(.*\)\s+=>\s+(\S+)', line)
+    for line in cache.splitlines():
+        match = re.match(rf'\s*{re.escape(name)}\s+\(.*\)\s+=>\s+(\S+)', line)
         if match:
             path = Path(match.group(1))
             if path.is_file():
@@ -41,8 +40,8 @@ def _linux_egl_library():
                 except OSError:
                     continue
                 return path
-    raise RuntimeError('Cannot load libEGL.so.1. Install the Linux EGL '
-                       'runtime before building.')
+    raise RuntimeError(f'Cannot load {name}. Install the Linux graphics '
+                       'runtime libraries before building.')
 
 
 def _platform_details():
@@ -86,7 +85,13 @@ def main():
         '--specpath', str(BUILD),
     ]
     if system == 'Linux':
-        command.extend(('--add-binary', f'{_linux_egl_library()}:.'))
+        try:
+            library_cache = subprocess.check_output(['ldconfig', '-p'], text=True)
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            raise RuntimeError('Cannot locate Linux graphics libraries. '
+                               'Install ldconfig and the graphics runtimes.') from exc
+        for name in LINUX_GRAPHICS_LIBRARIES:
+            command.extend(('--add-binary', f'{_linux_shared_library(name, library_cache)}:.'))
     command.append(str(ROOT / 'scripts/app_main.py'))
     subprocess.run(command, check=True, cwd=ROOT, env=build_environment)
 
@@ -94,11 +99,13 @@ def main():
     if not built.exists():
         raise RuntimeError(f'Build completed without expected output: {built}')
     if system == 'Linux':
-        required = {'libEGL.so.1', 'libxcb-image.so.0', 'libxcb-shape.so.0',
-                    'libxkbcommon-x11.so.0', 'libxcb-cursor.so.0',
-                    'libxcb-render-util.so.0', 'libxcb-util.so.1',
-                    'libxcb-icccm.so.4', 'libxcb-keysyms.so.1',
-                    'libxcb-xkb.so.1'}
+        required = set(LINUX_GRAPHICS_LIBRARIES) | {
+            'libxcb-image.so.0', 'libxcb-shape.so.0',
+            'libxkbcommon-x11.so.0', 'libxcb-cursor.so.0',
+            'libxcb-render-util.so.0', 'libxcb-util.so.1',
+            'libxcb-icccm.so.4', 'libxcb-keysyms.so.1',
+            'libxcb-xkb.so.1',
+        }
         present = {path.name for path in built.rglob('*')}
         missing = required - present
         if missing:

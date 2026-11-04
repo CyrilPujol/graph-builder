@@ -4,7 +4,7 @@ The GitHub Actions workflow builds separate archives for macOS Apple Silicon, ma
 
 To build on your own computer, use Python 3.10 or newer on the target operating system. Open a terminal and replace the example path in `cd` with your project location.
 
-On Linux, install your distribution's EGL and Qt XCB runtime libraries before building. The packager needs them available to include them in the download. The GitHub workflow also starts the finished Linux app in a clean Ubuntu container without those build packages.
+On Linux, install your distribution's OpenGL, EGL, and Qt XCB runtime libraries before building. The packager needs them available to include them in the download. The GitHub workflow also starts the finished Linux app in a clean Ubuntu container without those build packages.
 
 On macOS or Linux:
 
