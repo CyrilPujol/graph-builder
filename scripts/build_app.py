@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import subprocess
 import sys
 import tarfile
@@ -19,6 +20,29 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'local/build'
 DIST = ROOT / 'local/dist'
 NAME = 'Graph Builder'
+
+
+def _linux_egl_library():
+    """Find the EGL runtime on this build host for explicit PyInstaller inclusion."""
+    import ctypes
+
+    try:
+        libraries = subprocess.check_output(['ldconfig', '-p'], text=True)
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError('Cannot locate libEGL.so.1. Install the Linux EGL '
+                           'runtime before building.') from exc
+    for line in libraries.splitlines():
+        match = re.match(r'\s*libEGL\.so\.1\s+\(.*\)\s+=>\s+(\S+)', line)
+        if match:
+            path = Path(match.group(1))
+            if path.is_file():
+                try:
+                    ctypes.CDLL(str(path))
+                except OSError:
+                    continue
+                return path
+    raise RuntimeError('Cannot load libEGL.so.1. Install the Linux EGL '
+                       'runtime before building.')
 
 
 def _platform_details():
@@ -54,21 +78,32 @@ def main():
     BUILD.mkdir(parents=True, exist_ok=True)
     build_environment = os.environ.copy()
     build_environment['PYINSTALLER_CONFIG_DIR'] = str(BUILD / 'pyinstaller-config')
-    subprocess.run([
+    command = [
         sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean',
         '--windowed', '--onedir', '--name', NAME, '--icon', str(icon),
         '--paths', str(ROOT),
         '--distpath', str(DIST), '--workpath', str(BUILD / 'pyinstaller'),
-        '--specpath', str(BUILD), str(ROOT / 'scripts/app_main.py'),
-    ], check=True, cwd=ROOT, env=build_environment)
+        '--specpath', str(BUILD),
+    ]
+    if system == 'Linux':
+        command.extend(('--add-binary', f'{_linux_egl_library()}:.'))
+    command.append(str(ROOT / 'scripts/app_main.py'))
+    subprocess.run(command, check=True, cwd=ROOT, env=build_environment)
 
     built = DIST / (NAME + '.app' if system == 'macOS' else NAME)
     if not built.exists():
         raise RuntimeError(f'Build completed without expected output: {built}')
-    if system == 'Linux' and not any(path.name == 'libEGL.so.1'
-                                     for path in built.rglob('libEGL.so.1')):
-        raise RuntimeError('Linux bundle is missing libEGL.so.1. Install libegl1 '
-                           'on the build machine before running PyInstaller.')
+    if system == 'Linux':
+        required = {'libEGL.so.1', 'libxcb-image.so.0', 'libxcb-shape.so.0',
+                    'libxkbcommon-x11.so.0', 'libxcb-cursor.so.0',
+                    'libxcb-render-util.so.0', 'libxcb-util.so.1',
+                    'libxcb-icccm.so.4', 'libxcb-keysyms.so.1',
+                    'libxcb-xkb.so.1'}
+        present = {path.name for path in built.rglob('*')}
+        missing = required - present
+        if missing:
+            raise RuntimeError('Linux bundle is missing native Qt libraries: '
+                               + ', '.join(sorted(missing)))
     extension = '.tar.gz' if system == 'Linux' else '.zip'
     destination = DIST / f'GraphBuilder-{system}-{architecture}{extension}'
     if destination.exists():
