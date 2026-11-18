@@ -50,18 +50,27 @@ def _linux_shared_library(name, cache):
                        'runtime libraries before building.')
 
 
-def _linux_dependencies(binary):
+def _linux_dependencies(binary, library_directory):
     """Read the shared libraries needed by a packaged ELF binary."""
-    result = subprocess.run(['ldd', str(binary)], capture_output=True, text=True)
+    environment = os.environ.copy()
+    # PyInstaller's bootloader searches _internal first. Running ldd without
+    # that path falsely reports relocated wheel libraries (e.g. OR-Tools'
+    # hashed Abseil libraries) as missing, even when they are bundled.
+    # Do not let a build environment's extra paths hide missing bundle files.
+    environment['LD_LIBRARY_PATH'] = str(library_directory.resolve())
+    environment['LC_ALL'] = 'C'
+    result = subprocess.run(['ldd', str(binary)], capture_output=True, text=True,
+                            env=environment)
     if result.returncode:
         raise RuntimeError(f'Cannot inspect Linux dependencies of {binary}: '
                            f'{result.stdout}{result.stderr}')
     for line in result.stdout.splitlines():
         missing = re.match(r'\s*(\S+)\s+=>\s+not found', line)
         if missing:
-            raise RuntimeError(f'{binary} needs {missing.group(1)}, which is '
-                               'not installed on the build machine.')
-        match = re.match(r'\s*(\S+)\s+=>\s+(/\S+)\s+\(', line)
+            raise RuntimeError(f'{binary} needs {missing.group(1)}, which was '
+                               'not found in the bundle or system library paths.')
+        # The application directory itself contains a space: Graph Builder.
+        match = re.match(r'\s*(\S+)\s+=>\s+(/.+?)\s+\(0x[0-9a-fA-F]+\)', line)
         if match:
             yield match.group(1), Path(match.group(2))
 
@@ -77,7 +86,7 @@ def _bundle_linux_dependencies(built):
                     binaries.append(path)
     destination = built / '_internal'
     for binary in binaries:
-        for name, source in _linux_dependencies(binary):
+        for name, source in _linux_dependencies(binary, destination):
             if name in LINUX_HOST_LIBRARIES or name in packaged:
                 continue
             if not source.is_file():
