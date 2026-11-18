@@ -73,6 +73,15 @@ def main():
         if not any('Components: 1' in line for line in json.loads(output_path.read_text(encoding='utf-8'))):
             raise RuntimeError('Packaged graph analysis returned an unexpected result.')
         print('Packaged graph-analysis worker completed successfully.')
+        optimized = subprocess.run([str(executable), '--graph-info-worker', 'Solve:chromatic',
+                                    str(input_path), str(output_path)], cwd=directory,
+                                   env=environment, capture_output=True, text=True, timeout=20)
+        if optimized.returncode or not output_path.is_file():
+            raise RuntimeError(f'Packaged graph solver failed: {optimized.stderr}')
+        result = json.loads(output_path.read_text(encoding='utf-8'))
+        if result.get('lower') != 2 or result.get('upper') != 2 or not result.get('optimal'):
+            raise RuntimeError(f'Packaged graph solver returned an unexpected result: {result}')
+        print('Packaged graph solver completed successfully.')
 
 
 if __name__ == '__main__':

@@ -25,11 +25,12 @@ from graph_builder_core.lib import (
     unused_label,
     write_graph_file,
 )
+from graph_builder_core.optimization import optimize as optimize_graph
 
 __all__ = [
     'Action', 'ContextAction', 'EdgeAction', 'GraphAction', 'VertexAction',
     'VertexGroupAction', 'button', 'convert_from_file', 'discover_buttons',
-    'edit_graph', 'empty_graph', 'main', 'twin', 'unused_label',
+    'edit_graph', 'empty_graph', 'main', 'optimize_graph', 'twin', 'unused_label',
     'write_graph_file',
 ]
 

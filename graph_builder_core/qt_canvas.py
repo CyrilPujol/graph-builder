@@ -4,7 +4,7 @@ from __future__ import annotations
 from math import ceil, cos, hypot, pi, sin
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QInputDevice, QPainter, QPainterPath, QPen, QPolygonF, QTransform
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QInputDevice, QPainter, QPainterPath, QPainterPathStroker, QPen, QPolygonF, QTransform
 from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsItem, QGraphicsPathItem, QGraphicsScene, QGraphicsView
 
 from .lib import (
@@ -14,6 +14,9 @@ from .lib import (
     vertex_label,
 )
 from .layout import PIN_ATTRIBUTE
+from .regions import (line_controls, region_by_id, region_points, region_polygons,
+                      region_segment_points, segment_points,
+                      set_line_controls, update_region)
 from .styles import base_style, contrast_text_color, effective_style, vertex_boundary_distance
 
 NODE_RADIUS = 17
@@ -116,7 +119,8 @@ class NodeItem(QGraphicsItem):
             polygon = QPolygonF((QPointF(0, -radius), QPointF(radius, radius),
                                  QPointF(-radius, radius)))
         painter.setBrush(Qt.NoBrush if fill == 'none' else QColor(fill))
-        painter.setPen(QPen(QColor(style['outline']), float(style['outline_width'])))
+        painter.setPen(Qt.NoPen if style['outline'] == 'none' else
+                       QPen(QColor(style['outline']), float(style['outline_width'])))
         if kind == 'circle':
             painter.drawEllipse(QPointF(0, 0), radius, radius)
         elif kind == 'square':
@@ -129,6 +133,14 @@ class NodeItem(QGraphicsItem):
                                 2 if self.isSelected() else 1, Qt.DashLine))
             painter.drawEllipse(QPointF(0, 0), max(radius + 4, NODE_RADIUS),
                                 max(radius + 4, NODE_RADIUS))
+        if (self.node in self.window._full_join_first or
+                self.node in self.window._product_first or
+                self.node in self.window._morphism_first or
+                self.node in self.window._minor_first):
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor('#b87514'), 2.5, Qt.DashLine))
+            painter.drawEllipse(QPointF(0, 0), max(radius + 8, NODE_RADIUS + 8),
+                                max(radius + 8, NODE_RADIUS + 8))
         if self.window.scene.edge_hover_target == self.node:
             cue = QColor(SELECTION_COLOR)
             cue.setAlpha(160)
@@ -165,14 +177,19 @@ class NodeItem(QGraphicsItem):
         if change == QGraphicsItem.ItemPositionHasChanged and self.node in self.window.graph:
             self.window.graph.nodes[self.node]['position'] = (value.x(), value.y())
             self.window.refresh_adjacent_edges(self.node)
+            self.window.refresh_regions()
         return super().itemChange(change, value)
 
+from .edges import edge_data
+
+
 class EdgeItem(QGraphicsPathItem):
-    def __init__(self, window, source, target):
+    def __init__(self, window, source, target, key=None):
         super().__init__()
         self.window = window
         self.source = source
         self.target = target
+        self.key = key
         self.setFlag(QGraphicsItem.ItemIsSelectable)
         self.setZValue(1)
         self.refresh()
@@ -180,19 +197,19 @@ class EdgeItem(QGraphicsPathItem):
     def refresh(self):
         if not self.window.graph.has_edge(self.source, self.target):
             return
-        samples = edge_samples(self.window.graph, self.source, self.target)
+        samples = edge_samples(self.window.graph, self.source, self.target, self.key)
         path = QPainterPath(_point(samples[0]))
         for sample in samples[1:]:
             path.lineTo(_point(sample))
         self.setPath(path)
-        style = effective_style(self.window.graph, 'edge', self.window.graph.edges[self.source, self.target])
+        style = effective_style(self.window.graph, 'edge', edge_data(self.window.graph, self.source, self.target, self.key))
         self.setPen(QPen(QColor(style['stroke']), float(style['width'])))
         self.update()
 
     def _appearance(self):
         if self.source in self.window.graph and self.window.graph.has_edge(self.source, self.target):
             return effective_style(self.window.graph, 'edge',
-                                   self.window.graph.edges[self.source, self.target])
+                                   edge_data(self.window.graph, self.source, self.target, self.key))
         return base_style('edge', 0)
 
     def closest_path_position(self, position):
@@ -216,12 +233,23 @@ class EdgeItem(QGraphicsPathItem):
                 path_position = index - 1 + fraction
         return closest, path_position
 
+    def arrow_tip(self):
+        path = self.path()
+        end, before = path.pointAtPercent(1), path.pointAtPercent(.97)
+        dx, dy = end.x() - before.x(), end.y() - before.y()
+        length = hypot(dx, dy)
+        if not length:
+            return end
+        style = effective_style(self.window.graph, 'vertex', self.window.graph.nodes[self.target])
+        distance = vertex_boundary_distance(style, -dx / length, -dy / length)
+        return end - QPointF(dx / length * distance, dy / length * distance)
+
     def closest_path_point(self, position):
         """Project a click in the edge's hit area onto its visible path."""
         return self.closest_path_position(position)[0]
 
     def _label_rect(self):
-        label = edge_label(self.window.graph, self.source, self.target)
+        label = edge_label(self.window.graph, self.source, self.target, self.key)
         metrics = QFontMetricsF(_label_font(12))
         size = metrics.boundingRect(label)
         style = self._appearance()
@@ -243,7 +271,7 @@ class EdgeItem(QGraphicsPathItem):
         padding = max(13, float(style['width']) + 5)
         rect = super().boundingRect().adjusted(-padding, -padding, padding, padding)
         if self.window and self.source in self.window.graph and self.window.graph.has_edge(self.source, self.target):
-            if labels_visible(self.window.graph) and edge_label(self.window.graph, self.source, self.target):
+            if labels_visible(self.window.graph) and edge_label(self.window.graph, self.source, self.target, self.key):
                 rect = rect.united(self._label_rect())
         return rect
 
@@ -253,7 +281,7 @@ class EdgeItem(QGraphicsPathItem):
         style = self._appearance()
         stroke.setWidth(max(12, float(style['width']) + 6))
         shape = stroke.createStroke(self.path())
-        if labels_visible(self.window.graph) and edge_label(self.window.graph, self.source, self.target):
+        if labels_visible(self.window.graph) and edge_label(self.window.graph, self.source, self.target, self.key):
             shape.addRect(self._label_rect())
         return shape
 
@@ -300,7 +328,7 @@ class EdgeItem(QGraphicsPathItem):
                 painter.drawPath(arrow)
         if labels_visible(self.window.graph):
             painter.setOpacity(1.0)
-            label = edge_label(self.window.graph, self.source, self.target)
+            label = edge_label(self.window.graph, self.source, self.target, self.key)
             if label:
                 painter.setFont(_label_font(12))
                 rect = self._label_rect()
@@ -310,12 +338,111 @@ class EdgeItem(QGraphicsPathItem):
                 painter.setPen(QColor('#222222'))
                 painter.drawText(rect, Qt.AlignCenter, label)
 
+class RegionItem(QGraphicsPathItem):
+    """Selectable translucent polygon behind graph edges and vertices."""
+
+    def __init__(self, window, region):
+        super().__init__()
+        self.window = window
+        self.region_id = region['id']
+        self.setFlag(QGraphicsItem.ItemIsSelectable)
+        self.setZValue(0.4)
+        # QGraphicsPathItem's hit shape includes its interior only when it has
+        # a brush. The actual translucent fill is painted below.
+        self.setBrush(QColor(0, 0, 0, 1))
+        self.setPen(QPen(Qt.transparent, 4))
+        self.refresh()
+
+    def refresh(self):
+        region = region_by_id(self.window.graph, self.region_id)
+        polygons = region_polygons(self.window.graph, region) if region else []
+        path = QPainterPath()
+        for points in polygons:
+            path.moveTo(_point(points[0]))
+            for point in points[1:]:
+                path.lineTo(_point(point))
+            path.closeSubpath()
+        self.setPath(path)
+        self.update()
+
+    def paint(self, painter, option, widget=None):
+        region = region_by_id(self.window.graph, self.region_id)
+        if region is None:
+            return
+        style = region['style']
+        painter.setRenderHint(QPainter.Antialiasing)
+        if style['fill'] == 'none':
+            painter.setBrush(Qt.NoBrush)
+        else:
+            fill = QColor(style['fill'])
+            fill.setAlphaF(float(style['opacity']))
+            painter.setBrush(fill)
+        if style['outline'] == 'none':
+            painter.setPen(Qt.NoPen)
+        else:
+            outline = QColor(style['outline'])
+            outline.setAlphaF(float(style['opacity']))
+            painter.setPen(QPen(outline, float(style['width'])))
+        painter.drawPath(self.path())
+        if self.isSelected() and self.region_id not in self.window._regions_without_selection_cue:
+            cue = QColor(SELECTION_COLOR)
+            cue.setAlpha(38)
+            painter.setBrush(cue)
+            painter.setPen(QPen(SELECTION_COLOR, 2.5, Qt.DashLine))
+            painter.drawPath(self.path())
+        if region.get('label'):
+            painter.setOpacity(1)
+            painter.setFont(_label_font(11))
+            painter.setPen(QColor('#303943'))
+            painter.drawText(self.path().boundingRect(), Qt.AlignCenter, str(region['label']))
+
+
+class RegionBoundaryItem(QGraphicsPathItem):
+    """A selected region's boundary, above ordinary graph edges for editing."""
+
+    def __init__(self, window, region_id, segment_index):
+        super().__init__()
+        self.window = window
+        self.region_id = region_id
+        self.segment_index = segment_index
+        self.setZValue(1.5)
+        self.setVisible(False)
+        self.refresh()
+
+    def refresh(self):
+        region = region_by_id(self.window.graph, self.region_id)
+        if region is None or self.segment_index >= len(region.get('segments', [])):
+            self.setPath(QPainterPath())
+            return
+        points = region_segment_points(self.window.graph, region, self.segment_index)
+        path = QPainterPath(_point(points[0])) if points else QPainterPath()
+        for point in points[1:]:
+            path.lineTo(_point(point))
+        self.setPath(path)
+
+    def shape(self):
+        stroker = QPainterPathStroker()
+        stroker.setWidth(13)
+        return stroker.createStroke(self.path())
+
+    def boundingRect(self):
+        return self.path().boundingRect().adjusted(-7, -7, 7, 7)
+
+    def paint(self, painter, option, widget=None):
+        # RegionItem already draws the boundary. This item only supplies a
+        # practical click target, even when there is no standalone edge.
+        pass
+
+
 class CurveHandle(QGraphicsEllipseItem):
-    def __init__(self, window, source, target, index, position):
+    def __init__(self, window, source, target, index, position, key=None):
         super().__init__(-6, -6, 12, 12)
         self.window = window
         self.source, self.target, self.index = source, target, index
+        self.key = key
+        self._syncing = True
         self.setPos(_point(position))
+        self._syncing = False
         self.setBrush(QColor('#f29431'))
         self.setPen(QPen(Qt.white, 2))
         self.setZValue(4)
@@ -336,16 +463,124 @@ class CurveHandle(QGraphicsEllipseItem):
         painter.drawEllipse(self.rect())
 
     def itemChange(self, change, value):
-        if change == QGraphicsItem.ItemPositionHasChanged and self.window.graph.has_edge(self.source, self.target):
-            points = _edge_curve_points(self.window.graph, self.source, self.target)
+        if (change == QGraphicsItem.ItemPositionHasChanged and not self._syncing
+                and self.window.graph.has_edge(self.source, self.target)):
+            points = _edge_curve_points(self.window.graph, self.source, self.target, self.key)
             if self.index < len(points):
                 points[self.index] = (value.x(), value.y())
-                _set_edge_curve_points(self.window.graph, self.source, self.target, points)
+                _set_edge_curve_points(self.window.graph, self.source, self.target, points, self.key)
                 self.window.refresh_adjacent_edges(self.source)
+                self.window.refresh_regions()
         return super().itemChange(change, value)
+
+    def sync_position(self):
+        if not self.window.graph.has_edge(self.source, self.target):
+            return
+        points = _edge_curve_points(self.window.graph, self.source, self.target, self.key)
+        if self.index < len(points) and self.pos() != _point(points[self.index]):
+            self._syncing = True
+            self.setPos(_point(points[self.index]))
+            self._syncing = False
+
+
+class RegionCurveHandle(CurveHandle):
+    """A region boundary control, including one backed by a real graph edge."""
+
+    def __init__(self, window, region_id, segment_index, index, position):
+        self.region_id = region_id
+        self.segment_index = segment_index
+        self._syncing = True
+        super().__init__(window, None, None, index, position)
+        self._syncing = False
+
+    def current_position(self):
+        region = region_by_id(self.window.graph, self.region_id)
+        if region is None or self.segment_index >= len(region.get('segments', [])):
+            return None
+        segment = region['segments'][self.segment_index]
+        if segment['kind'] == 'edge':
+            source = segment.get('edge_source', segment['source'])
+            target = segment.get('edge_target', segment['target'])
+            points = _edge_curve_points(self.window.graph, source, target, segment.get('key'))
+        else:
+            points = line_controls(self.window.graph, segment)
+        if self.index >= len(points):
+            return None
+        point = points[self.index]
+        if not region.get('margin', 0):
+            return point
+        raw = segment_points(self.window.graph, segment)
+        visible = region_segment_points(self.window.graph, region, self.segment_index)
+        if not raw or len(raw) != len(visible):
+            return point
+        nearest = min(range(len(raw)), key=lambda i:
+                      (raw[i][0]-point[0])**2 + (raw[i][1]-point[1])**2)
+        return visible[nearest]
+
+    def sync_position(self):
+        position = self.current_position()
+        if position is not None and self.pos() != _point(position):
+            self._syncing = True
+            self.setPos(_point(position))
+            self._syncing = False
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemPositionHasChanged and not self._syncing:
+            region = region_by_id(self.window.graph, self.region_id)
+            if region is not None and self.segment_index < len(region.get('segments', [])):
+                segment = region['segments'][self.segment_index]
+                adjusted = value.toTuple()
+                if region.get('margin', 0):
+                    raw = segment_points(self.window.graph, segment)
+                    visible = region_segment_points(self.window.graph, region, self.segment_index)
+                    if raw and len(raw) == len(visible):
+                        old = self.current_position()
+                        if old is not None:
+                            control = (_edge_curve_points(self.window.graph,
+                                segment.get('edge_source', segment['source']),
+                                segment.get('edge_target', segment['target']),
+                                segment.get('key'))[self.index]
+                                if segment['kind'] == 'edge'
+                                else line_controls(self.window.graph, segment)[self.index])
+                            adjusted = (value.x() - (old[0] - control[0]),
+                                        value.y() - (old[1] - control[1]))
+                if segment['kind'] == 'edge':
+                    source = segment.get('edge_source', segment['source'])
+                    target = segment.get('edge_target', segment['target'])
+                    key = segment.get('key')
+                    points = _edge_curve_points(self.window.graph, source, target, key)
+                    if self.index < len(points):
+                        points[self.index] = adjusted
+                        _set_edge_curve_points(self.window.graph, source, target, points, key)
+                        edge = self.window.edge_items.get(self.window.edge_key(source, target, key))
+                        if edge is not None:
+                            edge.refresh()
+                else:
+                    points = line_controls(self.window.graph, segment)
+                    if self.index < len(points):
+                        points[self.index] = adjusted
+                        set_line_controls(self.window.graph, segment, points)
+                        update_region(self.window.graph, self.region_id,
+                                      {'segments': region['segments']})
+                self.window.refresh_regions()
+        return QGraphicsEllipseItem.itemChange(self, change, value)
 
 
 class GraphScene(QGraphicsScene):
+    def itemAt(self, position, device_transform):
+        """Resolve overlapping arcs by the nearest visible arrowhead."""
+        candidates = self.items(position, Qt.IntersectsItemShape, Qt.DescendingOrder,
+                                device_transform)
+        if not candidates:
+            return None
+        first = candidates[0]
+        if isinstance(first, EdgeItem) and self.window.is_directed:
+            edges = [item for item in candidates if isinstance(item, EdgeItem)]
+            return min(edges, key=lambda item: (
+                (item.arrow_tip().x() - position.x()) ** 2
+                + (item.arrow_tip().y() - position.y()) ** 2))
+        return first
+
     def __init__(self, window):
         super().__init__(-10000, -10000, 20000, 20000)
         self.window = window
@@ -380,6 +615,9 @@ class GraphScene(QGraphicsScene):
         self.double_click_candidate = None
         self.created_curve_handle = False
         self.secondary_handle = False
+        self.region_press_consumed = False
+        self.region_preview_item = None
+        self.region_boundary_drag = None
         self.lasso_points = []
         self.rubber_rect = None
 
@@ -614,18 +852,19 @@ class GraphScene(QGraphicsScene):
         changed = False
         added = False
         for source in sources:
-            if source != item.node:
+            if source != item.node or (self.window.graph.graph.get('loops', False)
+                                       and self.edge_left_vertex):
                 existed = self.window.graph.has_edge(source, item.node)
-                flip_edge(self.window.graph, source, item.node, self.window.edge_color)
+                edge_id = flip_edge(self.window.graph, source, item.node, self.window.edge_color)
                 changed = True
-                added |= not existed and self.window.graph.has_edge(source, item.node)
+                added |= self.window.graph.is_multigraph() or (not existed and self.window.graph.has_edge(source, item.node))
                 if not commit:
-                    key = self.window.edge_key(source, item.node)
+                    key = self.window.edge_key(source, item.node, edge_id)
                     old_item = self.window.edge_items.pop(key, None)
                     if old_item is not None:
                         self.removeItem(old_item)
                     if self.window.graph.has_edge(source, item.node):
-                        edge = EdgeItem(self.window, source, item.node)
+                        edge = EdgeItem(self.window, source, item.node, edge_id)
                         self.window.edge_items[key] = edge
                         self.addItem(edge)
         if changed:
@@ -639,11 +878,19 @@ class GraphScene(QGraphicsScene):
         return changed, added
 
     def mousePressEvent(self, event):
+        if self.window.region_path is not None:
+            self.window.region_path_click(next(
+                (item for item in self.items(event.scenePos())
+                 if item is not self.region_preview_item), None))
+            self.region_press_consumed = True
+            event.accept()
+            return
         self._live_relax_timer.stop()
         if self.axis_snap_guides:
             self.set_axis_snap_guides(())
         self.window.last_canvas_position = event.scenePos()
         item = self.itemAt(event.scenePos(), QTransform())
+        self.region_boundary_drag = None
         self.pressed_item = item
         self.pressed_item_was_selected = isinstance(item, (NodeItem, EdgeItem)) and item.isSelected()
         self.press_position = event.scenePos()
@@ -651,7 +898,8 @@ class GraphScene(QGraphicsScene):
         self.press_button = event.button()
         self.press_selection_mode = _selection_mode(event.modifiers())
         self.selection_was_empty = not bool(self.window.selection.nodes or
-                                            self.window.selection.edges)
+                                            self.window.selection.edges or
+                                            self.window.selection.regions)
         self.positions_before_drag = {}
         self.created_curve_handle = False
         self.secondary_handle = False
@@ -660,6 +908,22 @@ class GraphScene(QGraphicsScene):
                          and event.modifiers() & Qt.ControlModifier
                          and event.modifiers() & Qt.ShiftModifier
                          and not event.modifiers() & Qt.AltModifier)
+
+        if (isinstance(item, RegionBoundaryItem) and event.button() == Qt.LeftButton
+                and self.press_selection_mode == 'replace'
+                and not event.modifiers() & (Qt.ControlModifier | Qt.AltModifier)):
+            self.region_boundary_drag = {'item': item, 'index': None, 'kind': None}
+            event.accept()
+            return
+
+        if isinstance(item, RegionItem) and event.button() == Qt.LeftButton:
+            region = region_by_id(self.window.graph, item.region_id)
+            if region is not None and region['mode'] in ('hull', 'bag'):
+                border = QPainterPathStroker()
+                border.setWidth(14)
+                if border.createStroke(item.path()).contains(item.mapFromScene(event.scenePos())):
+                    self.window.report(
+                        'Convex hull edges follow their vertices. Choose Manual boundary in Region properties to reshape them.', 5)
 
         if (isinstance(item, EdgeItem) and item.isSelected()
                 and event.button() == Qt.LeftButton
@@ -677,6 +941,7 @@ class GraphScene(QGraphicsScene):
             self.edge_sources = self._edge_source_nodes(item)
             self.edge_position = None
             self.edge_drag_active = False
+            self.edge_left_vertex = False
             self.edge_chain_changed = False
             self.edge_chain_added = False
             self.edge_last_auto_node = item.node
@@ -707,13 +972,45 @@ class GraphScene(QGraphicsScene):
             super().mousePressEvent(event)
             return
 
-        if isinstance(item, (NodeItem, EdgeItem)):
+        if isinstance(item, (NodeItem, EdgeItem, RegionItem)):
             event.accept()
             return
         super().mousePressEvent(event)
 
+    def set_region_preview(self, points):
+        if self.region_preview_item is not None:
+            self.removeItem(self.region_preview_item)
+            self.region_preview_item = None
+        if not points:
+            return
+        path = QPainterPath(_point(points[0]))
+        for point in points[1:]:
+            path.lineTo(_point(point))
+        preview = QGraphicsPathItem(path)
+        if len(points) == 1:
+            marker = QPainterPath()
+            marker.addEllipse(_point(points[0]), 22, 22)
+            preview.setPath(marker)
+            preview.setBrush(Qt.NoBrush)
+            preview.setPen(QPen(SELECTION_COLOR, 3))
+            preview.setZValue(3)
+        else:
+            preview.setPen(QPen(SELECTION_COLOR, 3, Qt.DashLine))
+            preview.setZValue(1.8)
+        preview.setAcceptedMouseButtons(Qt.NoButton)
+        self.addItem(preview)
+        self.region_preview_item = preview
+
     def mouseMoveEvent(self, event):
         self.window.last_canvas_position = event.scenePos()
+        if self.region_boundary_drag is not None:
+            distance = (event.screenPos() - self.press_screen_position).manhattanLength()
+            if distance > DRAG_THRESHOLD:
+                if self.region_boundary_drag['index'] is None:
+                    self._start_region_boundary_curve()
+                self._move_region_boundary_curve(event.scenePos())
+            event.accept()
+            return
         if (isinstance(self.pressed_item, EdgeItem)
                 and self.pressed_item.isSelected()
                 and self.press_button == Qt.LeftButton
@@ -723,7 +1020,7 @@ class GraphScene(QGraphicsScene):
                 edge = self.pressed_item
                 handle = self.window.add_curve_point_at(
                     edge.source, edge.target, self.press_position,
-                    commit=False, snap_to_path=True,
+                    commit=False, snap_to_path=True, key=edge.key,
                 )
                 if handle is not None:
                     self.pressed_item = handle
@@ -733,6 +1030,8 @@ class GraphScene(QGraphicsScene):
             event.accept()
             return
         if self.edge_sources and isinstance(self.pressed_item, NodeItem):
+            if not self.pressed_item.contains(self.pressed_item.mapFromScene(event.scenePos())):
+                self.edge_left_vertex = True
             distance = (event.screenPos() - self.press_screen_position).manhattanLength()
             if distance > DRAG_THRESHOLD:
                 self.edge_drag_active = True
@@ -753,7 +1052,8 @@ class GraphScene(QGraphicsScene):
                 hovered = self.itemAt(event.scenePos(), QTransform())
                 self.set_edge_hover_target(
                     hovered.node if isinstance(hovered, NodeItem)
-                    and any(source != hovered.node for source in self.edge_sources) else None)
+                    and (any(source != hovered.node for source in self.edge_sources)
+                         or (self.window.graph.graph.get('loops', False) and self.edge_left_vertex)) else None)
                 self.edge_position = event.scenePos()
                 self.update()
             event.accept()
@@ -784,8 +1084,76 @@ class GraphScene(QGraphicsScene):
             return
         super().mouseMoveEvent(event)
 
+    def _start_region_boundary_curve(self):
+        state = self.region_boundary_drag
+        boundary = state['item']
+        region = region_by_id(self.window.graph, boundary.region_id)
+        segment = region['segments'][boundary.segment_index]
+        raw = segment_points(self.window.graph, segment)
+        visible = region_segment_points(self.window.graph, region, boundary.segment_index)
+        press = self.press_position
+        nearest = min(range(len(visible)), key=lambda i:
+                      (visible[i][0]-press.x())**2 + (visible[i][1]-press.y())**2)
+        state['padding_offset'] = (visible[nearest][0]-raw[nearest][0],
+                                   visible[nearest][1]-raw[nearest][1])
+        if segment['kind'] == 'edge':
+            source, target, key = (segment.get('edge_source', segment['source']),
+                                   segment.get('edge_target', segment['target']), segment.get('key'))
+            edge = self.window.edge_items.get(self.window.edge_key(source, target, key))
+            if edge is None:
+                return
+            controls = _edge_curve_points(self.window.graph, source, target, key)
+            raw_press = _point(raw[nearest])
+            index = self.window._curve_insertion_index(edge, controls, raw_press)
+            controls.insert(index, raw[nearest])
+            _set_edge_curve_points(self.window.graph, source, target, controls, key)
+            state.update(kind='edge', index=index, source=source, target=target, key=key)
+            edge.refresh()
+        else:
+            controls = line_controls(self.window.graph, segment)
+            control_indices = [min(range(len(raw)), key=lambda i:
+                               (raw[i][0]-x)**2 + (raw[i][1]-y)**2)
+                               for x, y in controls]
+            index = sum(i < nearest for i in control_indices)
+            controls.insert(index, raw[nearest])
+            set_line_controls(self.window.graph, segment, controls)
+            update_region(self.window.graph, boundary.region_id, {'segments': region['segments']})
+            state.update(kind='line', index=index)
+        self.window.refresh_regions()
+        self.window._update_region_curve_handles()
+
+    def _move_region_boundary_curve(self, position):
+        state = self.region_boundary_drag
+        if state['index'] is None:
+            return
+        offset_x, offset_y = state.get('padding_offset', (0, 0))
+        raw_position = (position.x() - offset_x, position.y() - offset_y)
+        if state['kind'] == 'edge':
+            source, target, key = state['source'], state['target'], state['key']
+            controls = _edge_curve_points(self.window.graph, source, target, key)
+            controls[state['index']] = raw_position
+            _set_edge_curve_points(self.window.graph, source, target, controls, key)
+            edge = self.window.edge_items.get(self.window.edge_key(source, target, key))
+            if edge is not None:
+                edge.refresh()
+        else:
+            boundary = state['item']
+            region = region_by_id(self.window.graph, boundary.region_id)
+            segment = region['segments'][boundary.segment_index]
+            controls = line_controls(self.window.graph, segment)
+            controls[state['index']] = raw_position
+            set_line_controls(self.window.graph, segment, controls)
+            update_region(self.window.graph, boundary.region_id, {'segments': region['segments']})
+        self.window.refresh_regions()
+        self.update()
+
     def mouseDoubleClickEvent(self, event):
+        if self.window.region_path is not None:
+            self.mousePressEvent(event)
+            return
         item = self.itemAt(event.scenePos(), QTransform())
+        if isinstance(item, RegionBoundaryItem):
+            item = self.window.region_items.get(item.region_id)
         same_click = (item is self.last_click_item
                       and self.last_click_screen_position is not None
                       and (event.screenPos() - self.last_click_screen_position).manhattanLength()
@@ -793,21 +1161,47 @@ class GraphScene(QGraphicsScene):
         # Qt emits the double-click event in place of the second press. Route it
         # through the normal press path so a subsequent drag still edits the graph.
         self.mousePressEvent(event)
-        if same_click and isinstance(item, (NodeItem, EdgeItem)) and event.button() == Qt.LeftButton:
+        if same_click and isinstance(item, (NodeItem, EdgeItem, RegionItem)) and event.button() == Qt.LeftButton:
             self.double_click_candidate = item
 
     def mouseReleaseEvent(self, event):
+        if self.region_press_consumed:
+            self.region_press_consumed = False
+            event.accept()
+            return
         self._live_relax_timer.stop()
         if self.axis_snap_guides:
             self.set_axis_snap_guides(())
         self.window.last_canvas_position = event.scenePos()
+        if self.region_boundary_drag is not None:
+            state = self.region_boundary_drag
+            self.region_boundary_drag = None
+            if state['index'] is not None:
+                self.window._update_region_curve_handles()
+                self.window.commit_change()
+            else:
+                region_item = self.window.region_items.get(state['item'].region_id)
+                if region_item is not None and self.double_click_candidate is region_item:
+                    self.double_click_candidate = None
+                    self.last_click_item = None
+                    self.window.edit_region_properties(region_item.region_id)
+                elif region_item is not None:
+                    _apply_selection(self, (region_item,), self.press_selection_mode)
+                    self.last_click_item = region_item
+                    self.last_click_screen_position = event.screenPos()
+            self.pressed_item = None
+            event.accept()
+            return
         if (self.press_screen_position is not None
                 and (event.screenPos() - self.press_screen_position).manhattanLength()
                 > DRAG_THRESHOLD):
             self.last_click_item = None
             self.last_click_screen_position = None
+        released_item = self.itemAt(event.scenePos(), QTransform())
+        if isinstance(released_item, RegionBoundaryItem):
+            released_item = self.window.region_items.get(released_item.region_id)
         if (self.double_click_candidate is not None
-                and self.itemAt(event.scenePos(), QTransform()) is self.double_click_candidate
+                and released_item is self.double_click_candidate
                 and (event.screenPos() - self.press_screen_position).manhattanLength()
                 <= DRAG_THRESHOLD):
             item = self.double_click_candidate
@@ -816,8 +1210,10 @@ class GraphScene(QGraphicsScene):
             self.pressed_item = None
             if isinstance(item, NodeItem):
                 self.window.edit_node_properties(item.node)
+            elif isinstance(item, RegionItem):
+                self.window.edit_region_properties(item.region_id)
             else:
-                self.window.edit_edge_properties(item.source, item.target)
+                self.window.edit_edge_properties(item.source, item.target, item.key)
             event.accept()
             return
         self.double_click_candidate = None
@@ -831,7 +1227,9 @@ class GraphScene(QGraphicsScene):
             chain_changed = self.edge_chain_changed
             chain_added = self.edge_chain_added
             trackpad_path = self.edge_trackpad_path
+            left_vertex = self.edge_left_vertex
             self.cancel_edge_creation()
+            self.edge_left_vertex = left_vertex
             if dragged:
                 changed, added = self._finish_edge(sources, target, commit=False)
                 if chain_changed or changed:
@@ -856,7 +1254,11 @@ class GraphScene(QGraphicsScene):
             if self.secondary_handle:
                 distance = (event.screenPos() - self.press_screen_position).manhattanLength()
                 if distance <= DRAG_THRESHOLD:
-                    self.window.delete_curve_point(item.source, item.target, item.index)
+                    if isinstance(item, RegionCurveHandle):
+                        self.window.delete_region_curve_point(
+                            item.region_id, item.segment_index, item.index)
+                    else:
+                        self.window.delete_curve_point(item.source, item.target, item.index, item.key)
                 self.pressed_item = None
                 self.secondary_handle = False
                 event.accept()
@@ -866,6 +1268,8 @@ class GraphScene(QGraphicsScene):
                 super().mouseReleaseEvent(event)
             if self.created_curve_handle or (before is not None and item.pos() != before):
                 self.window.commit_change()
+                if not isinstance(item, RegionCurveHandle):
+                    self.window._observe_tutorial('curve_edge')
             self.pressed_item = None
             self.created_curve_handle = False
             event.accept()
@@ -896,7 +1300,7 @@ class GraphScene(QGraphicsScene):
             self.pressed_item = None
             return
 
-        if isinstance(item, (NodeItem, EdgeItem)):
+        if isinstance(item, (NodeItem, EdgeItem, RegionItem)):
             keep_group = (selection_mode == 'replace' and self.pressed_item_was_selected
                           and isinstance(item, EdgeItem) and len(self.window.selection.edges) > 1)
             if not keep_group:
@@ -927,6 +1331,9 @@ class GraphView(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._pan_position = None
         self._pan_button = None
+        self._pan_start = None
+        self._pan_dragged = False
+        self._pan_region_position = None
         self._empty_start = None
         self._empty_scene_start = None
         self._empty_secondary = False
@@ -946,12 +1353,21 @@ class GraphView(QGraphicsView):
 
     def mousePressEvent(self, event):
         scene_position = self.mapToScene(event.position().toPoint())
-        item = self.scene().itemAt(scene_position, QTransform())
+        item = next((candidate for candidate in self.scene().items(scene_position)
+                     if candidate is not self.scene().region_preview_item), None)
+        if self.scene().window.region_path is not None and item is None:
+            self.scene().window.region_path_click(None)
+            event.accept()
+            return
         option_pan = (event.button() == Qt.LeftButton
                       and event.modifiers() & Qt.AltModifier)
         if event.button() == Qt.MiddleButton or option_pan:
             self._pan_position = event.position().toPoint()
             self._pan_button = event.button()
+            self._pan_start = self._pan_position
+            self._pan_dragged = False
+            self._pan_region_position = (scene_position if option_pan and isinstance(item, RegionItem)
+                                         else None)
             self.setCursor(Qt.ClosedHandCursor)
             event.accept()
             return
@@ -962,7 +1378,7 @@ class GraphView(QGraphicsView):
             self._empty_secondary = secondary
             self._empty_selection_mode = _selection_mode(event.modifiers())
             selection = self.scene().window.selection
-            self._empty_had_selection = bool(selection.nodes or selection.edges)
+            self._empty_had_selection = bool(selection.nodes or selection.edges or selection.regions)
             self._empty_dragged = False
             if secondary:
                 self.scene().lasso_points = [scene_position]
@@ -976,6 +1392,8 @@ class GraphView(QGraphicsView):
     def mouseMoveEvent(self, event):
         if self._pan_position is not None:
             position = event.position().toPoint()
+            if (position - self._pan_start).manhattanLength() > DRAG_THRESHOLD:
+                self._pan_dragged = True
             offset = position - self._pan_position
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - offset.x())
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - offset.y())
@@ -1018,9 +1436,15 @@ class GraphView(QGraphicsView):
 
     def mouseReleaseEvent(self, event):
         if event.button() == self._pan_button and self._pan_position is not None:
+            create_inside_region = not self._pan_dragged and self._pan_region_position is not None
+            region_position = self._pan_region_position
             self._pan_position = None
             self._pan_button = None
+            self._pan_start = None
+            self._pan_region_position = None
             self.unsetCursor()
+            if create_inside_region:
+                self.scene().window.add_node(region_position)
             event.accept()
             return
         if self._empty_start is not None:

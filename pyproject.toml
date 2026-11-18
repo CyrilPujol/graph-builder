@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "graph-builder"
-version = "0.1.1"
+version = "0.2.0"
 description = "Interactive graph visualisation and editing with Qt and NetworkX"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,6 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 build = ["pyinstaller>=6.15"]
+solver = ["ortools>=9.12,<10"]
 
 [tool.setuptools]
 py-modules = ["graph_builder", "graph_builder_lib", "tikz_export"]

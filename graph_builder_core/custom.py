@@ -9,6 +9,7 @@ import json
 import math
 
 import networkx as nx
+from .edges import edge_data, edge_records, visible_edges, add_edge, has_edge
 
 
 def discover_buttons(namespace):
@@ -45,12 +46,14 @@ def _point(value, description):
 
 def public_graph(graph):
     """Copy the document without exposing paired undirected arcs."""
-    from .lib import logical_edges
-    result = nx.Graph() if graph.graph.get('graph_type') == 'graph' else nx.DiGraph()
+    if graph.is_multigraph():
+        result = nx.MultiGraph() if graph.graph.get('graph_type') == 'graph' else nx.MultiDiGraph()
+    else:
+        result = nx.Graph() if graph.graph.get('graph_type') == 'graph' else nx.DiGraph()
     result.graph.update(copy.deepcopy(graph.graph))
     result.add_nodes_from(copy.deepcopy(list(graph.nodes(data=True))))
-    for u, v in logical_edges(graph):
-        result.add_edge(u, v, **copy.deepcopy(graph.edges[u, v]))
+    for u, v, key, data in visible_edges(graph):
+        add_edge(result, u, v, data, key)
     return result
 
 
@@ -70,6 +73,8 @@ def integer_key_input(graph):
             candidate += 1
         mapping[node] = str(identifier)
     result = nx.relabel_nodes(graph, mapping, copy=True)
+    from .regions import remap_regions
+    remap_regions(result, mapping)
     for node, identifier in mapping.items():
         if type(node) is not int and 'label' not in result.nodes[identifier]:
             result.nodes[identifier]['label'] = str(node)
@@ -106,6 +111,8 @@ def integer_key_output(graph):
         occupied.add(candidate)
         candidate += 1
     result = nx.relabel_nodes(graph, mapping, copy=True)
+    from .regions import remap_regions
+    remap_regions(result, mapping)
     for node, identifier in mapping.items():
         if 'label' not in result.nodes[identifier]:
             result.nodes[identifier]['label'] = str(node)
@@ -118,15 +125,15 @@ def normalize_graph(result, original, center=(0, 0), orientations=None):
     if not isinstance(result, nx.Graph):
         raise TypeError('Return a NetworkX Graph/DiGraph, or return None after editing the graph in place. '
                         f'Received {type(result).__name__}.')
-    if result.is_multigraph():
-        raise ValueError('Parallel edges (MultiGraph/MultiDiGraph) are not supported by the editor.')
-    if nx.number_of_selfloops(result):
-        raise ValueError('Self-loops are not supported by the editor; remove edges from a vertex to itself.')
+    if result.is_multigraph() and not original.graph.get('multiedges', False):
+        raise ValueError('Parallel edges require Multiedges in Structure. Enable it before returning a MultiGraph.')
+    if nx.number_of_selfloops(result) and not original.graph.get('loops', False):
+        raise ValueError('Self-loops require Loops in Structure. Enable it before adding a self-loop.')
     directed = original.graph.get('graph_type') != 'graph'
     if result.is_directed() != directed:
         raise ValueError('The returned graph changes directedness. Change it in Graph properties first, '
                          'or return a graph with the same directedness as the input.')
-    graph = empty_graph()
+    graph = empty_graph(multiedges=original.graph.get('multiedges', False))
     graph.graph.update(copy.deepcopy(original.graph))
     graph.graph.update(copy.deepcopy({key: value for key, value in result.graph.items()
                                      if key not in DEFAULT_GRAPH_OPTIONS}))
@@ -166,17 +173,17 @@ def normalize_graph(result, original, center=(0, 0), orientations=None):
                 break
         graph.nodes[mapping[node]]['position'] = position
         occupied.append(position)
-    for u, v, attributes in result.edges(data=True):
-        data = copy.deepcopy(original.edges[u, v]) if original.has_edge(u, v) else {}
+    for u, v, key, attributes in edge_records(result):
+        data = copy.deepcopy(edge_data(original, u, v, key)) if has_edge(original, u, v, key) else {}
         data.update(copy.deepcopy(attributes))
         data['col'] = _number(data.get('col', 0), f'Edge {u!r}–{v!r} color (col)', True)
         data['label'] = str(data.get('label', ''))
         a, b = mapping[u], mapping[v]
         curves = data.pop('curve_offsets', None)
         absolute = data.pop('curve_points', None)
-        graph.add_edge(a, b, **data)
+        key = add_edge(graph, a, b, data, key)
         if not directed:
-            graph.add_edge(b, a, **copy.deepcopy(data))
+            add_edge(graph, b, a, data, key)
         if curves or absolute:
             raw = curves or absolute
             try:
@@ -189,10 +196,13 @@ def normalize_graph(result, original, center=(0, 0), orientations=None):
             if curves:
                 p, q = graph.nodes[a]['position'], graph.nodes[b]['position']
                 points = [(x + (p[0] + q[0]) / 2, y + (p[1] + q[1]) / 2) for x, y in points]
-            _set_edge_curve_points(graph, a, b, points)
+            _set_edge_curve_points(graph, a, b, points, key)
     for key, values in (('num_vertex_colors', [d['col'] for _, d in graph.nodes(data=True)]),
                         ('num_edge_colors', [d['col'] for _, _, d in graph.edges(data=True)])):
         graph.graph[key] = max(graph.graph[key], max(values, default=0) + 1)
+    from .regions import prune_regions, remap_regions
+    remap_regions(graph, mapping)
+    prune_regions(graph)
     # Reject attributes that would work on canvas but later break GraphML saving.
     for description, data in [('Graph', graph.graph)] + [(f'Vertex {n!r}', d) for n, d in graph.nodes(data=True)] + [(f'Edge {u!r}–{v!r}', d) for u, v, d in graph.edges(data=True)]:
         for key, value in data.items():
@@ -215,12 +225,14 @@ The decorator's `name` sets the button text, `shortcut` sets its keyboard
 shortcut, and `selection` determines what the decorated function receives.
 
 The decorated function always receives a NetworkX graph as its first
-argument: nx.Graph for an undirected document, nx.DiGraph for a directed one.
+argument: nx.Graph or nx.DiGraph for a simple document, or the corresponding
+MultiGraph or MultiDiGraph when Multiedges is enabled in Structure.
 It may modify that graph in place and return None, or return a graph.
 
 With selection='vertex', its second argument is one vertex ID.
 With selection='vertices', it is a (possibly empty) set of vertex IDs.
-With selection='edge', it is a (source, target) pair.
+With selection='edge', it is a (source, target) pair for simple graphs or
+(source, target, key) for multigraphs.
 Without `selection`, the function receives only the graph.
 """
     from .lib import Action, selected_vertices
@@ -241,7 +253,7 @@ Without `selection`, the function receives only the graph.
 
         def invoke(context):
             graph = public_graph(context.graph)
-            orientations = {frozenset((u, v)): (u, v) for u, v in graph.edges} if not graph.is_directed() else None
+            orientations = {frozenset((u, v)): (u, v) for u, v in graph.edges()} if not graph.is_directed() else None
             args = [graph]
             if selection == 'vertex':
                 args.append(context.selection.single_node())
@@ -249,7 +261,8 @@ Without `selection`, the function receives only the graph.
                 args.append(selected_vertices(context.selection))
             elif selection == 'edge':
                 edge = next(iter(context.selection.edges))
-                args.append((edge.source, edge.target))
+                args.append((edge.source, edge.target, edge.key) if graph.is_multigraph()
+                            else (edge.source, edge.target))
             result = function(*args)
             center = (0, 0)
             if context.interaction is not None:

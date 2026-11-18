@@ -7,7 +7,7 @@ from graph_builder import button, main
 
 @button('Color graph')
 def color_graph(graph):
-    """Give adjacent vertices different types where possible."""
+    """Give adjacent vertices different styles where possible."""
     colors = nx.coloring.greedy_color(graph.to_undirected())
     nx.set_node_attributes(graph, colors, 'col')
 

@@ -1,12 +1,11 @@
 """Graph data and extension API shared by the Qt editor and custom scripts.
 
-No GUI toolkit is imported here. Graphs remain NetworkX ``DiGraph`` objects;
-an undirected edge is stored as two matching arcs for compatibility with old
-GraphML files and with user-defined transformations.
+No GUI toolkit is imported here. Simple documents use NetworkX ``DiGraph``
+and multiedge documents use ``MultiDiGraph``. An undirected edge is stored as
+two matching arcs for compatibility with old GraphML files.
 """
 from __future__ import annotations
 
-import colorsys
 import copy
 import json
 from dataclasses import dataclass, field
@@ -17,15 +16,19 @@ from typing import Any, Callable
 import networkx as nx
 from networkx.readwrite import json_graph
 
+from .palette import colormap_1
+from .edges import edge_data, edge_records, visible_edges, add_edge, has_edge, remove_edge
+
 
 DEFAULT_GRAPH_OPTIONS = {
     'graph_type': 'graph', 'num_edge_colors': 2,
     'num_vertex_colors': 4, 'show_labels': True,
+    'loops': False, 'multiedges': False,
 }
 
 
 def empty_graph(**options):
-    graph = nx.DiGraph()
+    graph = nx.MultiDiGraph() if options.get('multiedges') else nx.DiGraph()
     graph.graph.update(DEFAULT_GRAPH_OPTIONS)
     graph.graph.update(options)
     return graph
@@ -39,22 +42,12 @@ def unused_label(graph):
     return str(index)
 
 
-def colormap_1(index):
-    if int(index) == 0:
-        return (0, 0, 0)
-    golden_ratio = (5 ** .5 - 1) / 2
-    saturation = max(0, 1 - .075 * (int(index) // 5))
-    return tuple(round(channel * 255) for channel in colorsys.hsv_to_rgb(
-        (golden_ratio * (int(index) - 1)) % 1, 1, saturation,
-    ))
-
-
 def vertex_label(graph, node):
     return str(graph.nodes[node].get('label', node))
 
 
-def edge_label(graph, source, target):
-    return str(graph.edges[source, target].get('label', ''))
+def edge_label(graph, source, target, key=None):
+    return str(edge_data(graph, source, target, key).get('label', ''))
 
 
 def labels_visible(graph):
@@ -63,25 +56,42 @@ def labels_visible(graph):
 
 def logical_edges(graph):
     """Yield each visible edge once, including every directed arc."""
-    directed = graph.graph.get('graph_type') != 'graph'
-    seen = set()
-    for source, target in graph.edges:
-        key = (source, target) if directed else frozenset((source, target))
-        if key not in seen:
-            seen.add(key)
-            yield source, target
+    for source, target, _, _ in visible_edges(graph):
+        yield source, target
 
 
-def set_edge_label(graph, source, target, label):
-    graph.edges[source, target]['label'] = label
-    if graph.graph.get('graph_type') == 'graph' and graph.has_edge(target, source):
-        graph.edges[target, source]['label'] = label
+def set_edge_label(graph, source, target, label, key=None):
+    edge_data(graph, source, target, key)['label'] = label
+    if graph.graph.get('graph_type') == 'graph' and has_edge(graph, target, source, key):
+        edge_data(graph, target, source, key)['label'] = label
 
 
 def flip_edge(graph, source, target, edge_color=0):
-    """Toggle a logical edge using the editor's paired-arc convention."""
-    if source == target:
+    """Toggle a simple edge, or add a clear path in a multigraph."""
+    if source == target and not graph.graph.get('loops', False):
         return
+    if graph.is_multigraph():
+        from .edge_layout import free_loop_controls, parallel_controls
+        controls = []
+        if all(node in graph and 'position' in graph.nodes[node]
+               for node in (source, target)):
+            controls = (free_loop_controls(graph, source) if source == target else
+                        parallel_controls(graph, source, target))
+        # Use a free key in both directions so paired undirected arcs agree.
+        key = 0
+        while has_edge(graph, source, target, key) or has_edge(graph, target, source, key):
+            key += 1
+        add_edge(graph, source, target, {'col': edge_color}, key)
+        if graph.graph.get('graph_type') == 'graph' and source != target:
+            add_edge(graph, target, source, {'col': edge_color}, key)
+        if controls:
+            _set_edge_curve_points(graph, source, target, controls, key)
+        return key
+    controls = None
+    if (source == target and not graph.has_edge(source, target)
+            and source in graph and 'position' in graph.nodes[source]):
+        from .edge_layout import free_loop_controls
+        controls = free_loop_controls(graph, source)
     if graph.graph.get('graph_type') == 'graph':
         if graph.has_edge(source, target) or graph.has_edge(target, source):
             graph.remove_edges_from(((source, target), (target, source)))
@@ -92,9 +102,75 @@ def flip_edge(graph, source, target, edge_color=0):
         graph.remove_edge(source, target)
     else:
         graph.add_edge(source, target, col=edge_color)
+    if controls and graph.has_edge(source, target):
+        _set_edge_curve_points(graph, source, target, controls)
+
+
+def full_join(graph, first, second, edge_color=0):
+    """Add every allowed edge from ``first`` to ``second`` once.
+
+    Existing simple edges are left alone. In a multigraph each distinct pair
+    gains one edge, with the same automatic curve placement as manual creation.
+    """
+    sources = set(first) & set(graph)
+    targets = set(second) & set(graph)
+    directed = graph.graph.get('graph_type') != 'graph'
+    loops = bool(graph.graph.get('loops', False))
+    seen = set()
+    added = 0
+    for source in sorted(sources, key=str):
+        for target in sorted(targets, key=str):
+            if source == target and not loops:
+                continue
+            identity = (source, target) if directed else frozenset((source, target))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if not graph.is_multigraph() and (
+                    graph.has_edge(source, target) or
+                    (not directed and graph.has_edge(target, source))):
+                continue
+            flip_edge(graph, source, target, edge_color)
+            added += 1
+    return added
+
+
+def _loop_controls(graph, node, index=1):
+    from .edge_layout import loop_controls
+    return loop_controls(graph, node, index - 1)
 
 
 def set_directed(graph, directed):
+    if graph.is_multigraph():
+        if not directed:
+            def id_order(node):
+                identifier = str(node)
+                return (0, int(identifier), identifier) if identifier.isdecimal() else (1, identifier)
+
+            identities = {(frozenset((u, v)), key)
+                          for u, v, key, _ in edge_records(graph)}
+            retained = []
+            for pair, key in sorted(identities, key=lambda entry: (
+                    tuple(sorted(map(id_order, entry[0]))), str(entry[1]))):
+                if len(pair) == 1:
+                    source = target = next(iter(pair))
+                else:
+                    first, second = sorted(pair, key=id_order)
+                    source, target = ((first, second) if has_edge(graph, first, second, key)
+                                      else (second, first))
+                retained.append((source, target, key,
+                                 copy.deepcopy(edge_data(graph, source, target, key)),
+                                 _edge_curve_points(graph, source, target, key)))
+            graph.clear_edges()
+            graph.graph['graph_type'] = 'graph'
+            for source, target, key, data, points in retained:
+                add_edge(graph, source, target, data, key)
+                if source != target:
+                    add_edge(graph, target, source, data, key)
+                if points:
+                    _set_edge_curve_points(graph, source, target, points, key)
+        graph.graph['graph_type'] = 'digraph' if directed else 'graph'
+        return
     if not directed:
         # A directed pair can carry two different looks or labels. Keep the
         # arc from the lower internal ID when both exist, then mirror it.
@@ -126,11 +202,11 @@ def set_directed(graph, directed):
                 _set_edge_curve_points(graph, source, target, points)
 
 
-def _edge_curve_points(graph, source, target):
+def _edge_curve_points(graph, source, target, key=None):
     """Read absolute curve points from current or older GraphML attributes."""
     if not graph.has_edge(source, target):
         return []
-    data = graph.edges[source, target]
+    data = edge_data(graph, source, target, key)
     relative = bool(data.get('curve_offsets'))
     value = data.get('curve_offsets') or data.get('curve_points')
     if not value:
@@ -148,18 +224,18 @@ def _edge_curve_points(graph, source, target):
     return points
 
 
-def _set_edge_curve_points(graph, source, target, points):
+def _set_edge_curve_points(graph, source, target, points, key=None):
     if not graph.has_edge(source, target):
         return
     start = graph.nodes[source]['position']
     end = graph.nodes[target]['position']
     midpoint = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
     offsets = [(x - midpoint[0], y - midpoint[1]) for x, y in points]
-    graph.edges[source, target]['curve_offsets'] = json.dumps(offsets)
-    graph.edges[source, target].pop('curve_points', None)
-    if graph.graph.get('graph_type') == 'graph' and graph.has_edge(target, source):
-        graph.edges[target, source]['curve_offsets'] = json.dumps(list(reversed(offsets)))
-        graph.edges[target, source].pop('curve_points', None)
+    edge_data(graph, source, target, key)['curve_offsets'] = json.dumps(offsets)
+    edge_data(graph, source, target, key).pop('curve_points', None)
+    if source != target and graph.graph.get('graph_type') == 'graph' and has_edge(graph, target, source, key):
+        edge_data(graph, target, source, key)['curve_offsets'] = json.dumps(list(reversed(offsets)))
+        edge_data(graph, target, source, key).pop('curve_points', None)
 
 
 def contract(graph, vertices, new_vertex=None, representative=None):
@@ -186,11 +262,13 @@ def contract(graph, vertices, new_vertex=None, representative=None):
     attributes = copy.deepcopy(graph.nodes[representative])
     attributes['position'] = position
     new_graph.add_node(new_vertex, **attributes)
-    for source, target, attributes in graph.edges(data=True):
+    for source, target, key, attributes in visible_edges(graph):
         source = new_vertex if source in vertices else source
         target = new_vertex if target in vertices else target
-        if source != target:
-            new_graph.add_edge(source, target, **copy.deepcopy(attributes))
+        if source != target or graph.graph.get('loops', False):
+            key = add_edge(new_graph, source, target, attributes)
+            if graph.graph.get('graph_type') == 'graph' and source != target:
+                add_edge(new_graph, target, source, attributes, key)
     return new_graph
 
 
@@ -269,7 +347,10 @@ def complement(graph, vertices):
         for index, source in enumerate(vertices):
             for target in vertices[index + 1:]:
                 if graph.has_edge(source, target) or graph.has_edge(target, source):
-                    graph.remove_edges_from(((source, target), (target, source)))
+                    while graph.has_edge(source, target):
+                        graph.remove_edge(source, target)
+                    while graph.has_edge(target, source):
+                        graph.remove_edge(target, source)
                 else:
                     graph.add_edge(source, target, col=0)
                     graph.add_edge(target, source, col=0)
@@ -278,7 +359,8 @@ def complement(graph, vertices):
             for target in vertices:
                 if source != target:
                     if graph.has_edge(source, target):
-                        graph.remove_edge(source, target)
+                        while graph.has_edge(source, target):
+                            graph.remove_edge(source, target)
                     else:
                         graph.add_edge(source, target, col=0)
     return graph
@@ -295,14 +377,14 @@ def transform_selection(graph, vertices, transform):
     directed = graph.graph.get('graph_type') != 'graph'
     seen_edges = set()
     curve_points = {}
-    for source, target in graph.edges:
+    for source, target, key, _ in visible_edges(graph):
         if source not in vertices and target not in vertices:
             continue
-        edge_key = (source, target) if directed else frozenset((source, target))
+        edge_key = ((source, target) if directed else frozenset((source, target)), key)
         if edge_key in seen_edges:
             continue
         seen_edges.add(edge_key)
-        curve_points[(source, target)] = _edge_curve_points(graph, source, target)
+        curve_points[(source, target, key)] = _edge_curve_points(graph, source, target, key)
 
     def transform_point(point):
         x, y = transform(point[0] - center_x, point[1] - center_y)
@@ -310,11 +392,11 @@ def transform_selection(graph, vertices, transform):
 
     for vertex in vertices:
         graph.nodes[vertex]['position'] = transform_point(graph.nodes[vertex]['position'])
-    for (source, target), points in curve_points.items():
+    for (source, target, key), points in curve_points.items():
         if points:
             transformed = ([transform_point(point) for point in points]
                            if source in vertices and target in vertices else points)
-            _set_edge_curve_points(graph, source, target, transformed)
+            _set_edge_curve_points(graph, source, target, transformed, key)
     return graph
 
 
@@ -383,10 +465,10 @@ def _interpolating_curve_samples(start, end, points, steps=32):
     return samples
 
 
-def edge_samples(graph, source, target):
+def edge_samples(graph, source, target, key=None):
     return _interpolating_curve_samples(
         graph.nodes[source]['position'], graph.nodes[target]['position'],
-        _edge_curve_points(graph, source, target),
+        _edge_curve_points(graph, source, target, key) or (_loop_controls(graph, source) if source == target else []),
     )
 
 
@@ -586,7 +668,7 @@ def snap_unselected_vertices(graph, selected_nodes, mode, center=(0, 0), unit=30
 
 def convert_position(graph):
     """Create a GraphML-safe graph with x/y attributes and graph settings."""
-    output = nx.DiGraph()
+    output = nx.MultiDiGraph() if graph.is_multigraph() else nx.DiGraph()
     output.graph.update(copy.deepcopy(graph.graph))
     for node, data in graph.nodes(data=True):
         attributes = copy.deepcopy(data)
@@ -594,8 +676,18 @@ def convert_position(graph):
             x, y = attributes.pop('position')
             attributes.update(position_x=float(x), position_y=float(y))
         output.add_node(str(node), **attributes)
-    for source, target, data in graph.edges(data=True):
-        output.add_edge(str(source), str(target), **copy.deepcopy(data))
+    for index, (source, target, key, data) in enumerate(edge_records(graph)):
+        attributes = copy.deepcopy(data)
+        if graph.is_multigraph():
+            # GraphML edge IDs are document-wide, while an undirected logical
+            # edge uses the same key for its two stored arcs.
+            attributes['graph_builder_edge_key'] = (
+                f'int:{key}' if type(key) is int else f'str:{key}')
+            add_edge(output, str(source), str(target), attributes, f'edge-{index}')
+        else:
+            add_edge(output, str(source), str(target), attributes)
+    from .regions import remap_regions
+    remap_regions(output, {node: str(node) for node in graph})
     return output
 
 
@@ -607,9 +699,16 @@ def convert_from_file(graph_file, kwargs=None):
     if not Path(graph_file).exists():
         return empty_graph(**options)
     loaded = nx.read_graphml(graph_file)
-    graph = nx.DiGraph()
+    def enabled(value):
+        return value is True or str(value).strip().lower() in ('true', '1', 'yes')
+
+    graph = (nx.MultiDiGraph() if loaded.is_multigraph() or
+             enabled(loaded.graph.get('multiedges')) else nx.DiGraph())
     graph.graph.update(options)
     graph.graph.update(loaded.graph)
+    graph.graph['multiedges'] = graph.is_multigraph()
+    graph.graph['loops'] = (enabled(graph.graph.get('loops')) or
+                            bool(nx.number_of_selfloops(loaded)))
     if 'show_labels' not in loaded.graph and 'show_vertex_labels' in loaded.graph:
         graph.graph['show_labels'] = str(loaded.graph['show_vertex_labels']).lower() != 'false'
     else:
@@ -623,20 +722,26 @@ def convert_from_file(graph_file, kwargs=None):
         attributes['position'] = (x, y)
         attributes['col'] = int(attributes.get('col', 0))
         graph.add_node(str(node), **attributes)
-    for source, target, data in loaded.edges(data=True):
+    for source, target, key, data in edge_records(loaded):
         attributes = dict(data)
         attributes['col'] = int(attributes.get('col', 0))
-        graph.add_edge(str(source), str(target), **attributes)
+        if graph.is_multigraph():
+            stored_key = attributes.pop('graph_builder_edge_key', None)
+            if isinstance(stored_key, str) and stored_key.startswith('int:'):
+                key = int(stored_key[4:])
+            elif isinstance(stored_key, str) and stored_key.startswith('str:'):
+                key = stored_key[4:]
+        add_edge(graph, str(source), str(target), attributes, key)
     if graph.graph['graph_type'] == 'graph':
-        for source, target, data in list(graph.edges(data=True)):
-            if not graph.has_edge(target, source):
-                graph.add_edge(target, source, **copy.deepcopy(data))
-                points = _edge_curve_points(graph, source, target)
+        for source, target, key, data in list(edge_records(graph)):
+            if not has_edge(graph, target, source, key):
+                add_edge(graph, target, source, data, key)
+                points = _edge_curve_points(graph, source, target, key)
                 if points:
-                    _set_edge_curve_points(graph, source, target, points)
-    for source, target in list(graph.edges):
-        if graph.edges[source, target].get('curve_points'):
-            _set_edge_curve_points(graph, source, target, _edge_curve_points(graph, source, target))
+                    _set_edge_curve_points(graph, source, target, points, key)
+    for source, target, key, data in list(edge_records(graph)):
+        if data.get('curve_points'):
+            _set_edge_curve_points(graph, source, target, _edge_curve_points(graph, source, target, key), key)
     return graph
 
 
@@ -660,12 +765,13 @@ class EdgeRef:
     source: Any
     target: Any
     directed: bool
+    key: Any = None
 
     def __hash__(self):
-        return hash((self.directed, (self.source, self.target) if self.directed else frozenset((self.source, self.target))))
+        return hash((self.key, self.directed, (self.source, self.target) if self.directed else frozenset((self.source, self.target))))
 
     def __eq__(self, other):
-        if not isinstance(other, EdgeRef) or self.directed != other.directed:
+        if not isinstance(other, EdgeRef) or self.directed != other.directed or self.key != other.key:
             return False
         return ((self.source, self.target) == (other.source, other.target) if self.directed
                 else frozenset((self.source, self.target)) == frozenset((other.source, other.target)))
@@ -675,17 +781,21 @@ class EdgeRef:
 class SelectionState:
     nodes: set = field(default_factory=set)
     edges: set = field(default_factory=set)
+    regions: set = field(default_factory=set)
 
     def clear(self):
         self.nodes.clear()
         self.edges.clear()
+        self.regions.clear()
 
     def single_node(self):
-        return next(iter(self.nodes)) if len(self.nodes) == 1 and not self.edges else None
+        return next(iter(self.nodes)) if len(self.nodes) == 1 and not self.edges and not self.regions else None
 
     def prune(self, graph):
         self.nodes.intersection_update(graph.nodes)
-        self.edges = {edge for edge in self.edges if graph.has_edge(edge.source, edge.target)}
+        self.edges = {edge for edge in self.edges if has_edge(graph, edge.source, edge.target, edge.key)}
+        from .regions import regions
+        self.regions.intersection_update(region['id'] for region in regions(graph))
 
 
 def selected_vertices(selection):
@@ -702,22 +812,31 @@ class GraphClipboard:
     node_attributes: dict
     internal_edges: tuple
     boundary_edges: tuple
+    regions: tuple = ()
 
 
 def copy_graph_selection(graph, selected_nodes=None):
     selected = set(graph.nodes) if selected_nodes is None else set(selected_nodes) & set(graph)
     nodes = tuple(node for node in graph if node in selected)
     internal, boundary = [], []
-    for source, target, data in graph.edges(data=True):
+    for source, target, key, data in edge_records(graph):
         if source in selected and target in selected:
-            internal.append((source, target, copy.deepcopy(data)))
+            internal.append((source, target, key, copy.deepcopy(data)))
         elif source in selected or target in selected:
-            boundary.append((source, target, copy.deepcopy(data)))
+            boundary.append((source, target, key, copy.deepcopy(data)))
+    from .regions import regions
+    def referenced_nodes(region):
+        if region['mode'] in ('hull', 'bag'):
+            return set(region['nodes'])
+        return {node for segment in region.get('segments', [])
+                for node in (segment['source'], segment['target'])}
+    copied_regions = tuple(copy.deepcopy(region) for region in regions(graph)
+                           if referenced_nodes(region) <= selected)
     return GraphClipboard(nodes, {node: copy.deepcopy(dict(graph.nodes[node])) for node in nodes},
-                          tuple(internal), tuple(boundary))
+                          tuple(internal), tuple(boundary), copied_regions)
 
 
-def paste_graph_selection(graph, clipboard, offset=(20, 20)):
+def paste_graph_selection(graph, clipboard, offset=(20, 20), *, return_regions=False):
     output = copy.deepcopy(graph)
     mapping = {}
     for old in clipboard.nodes:
@@ -727,17 +846,33 @@ def paste_graph_selection(graph, clipboard, offset=(20, 20)):
         data['position'] = (x + offset[0], y + offset[1])
         output.add_node(new, **data)
         mapping[old] = new
-    for source, target, data in (*clipboard.internal_edges, *clipboard.boundary_edges):
+    for source, target, key, data in (*clipboard.internal_edges, *clipboard.boundary_edges):
         if source in mapping or target in mapping:
             new_source, new_target = mapping.get(source, source), mapping.get(target, target)
             if new_source in output and new_target in output:
-                output.add_edge(new_source, new_target, **copy.deepcopy(data))
+                add_edge(output, new_source, new_target, data, key)
+    from .regions import add_region
+    region_ids = set()
+    for region in clipboard.regions:
+        remapped = copy.deepcopy(region)
+        remapped['nodes'] = [mapping[node] for node in region.get('nodes', [])]
+        for segment in remapped.get('segments', []):
+            for field in ('source', 'target', 'edge_source', 'edge_target'):
+                if field in segment:
+                    segment[field] = mapping[segment[field]]
+        identifier = add_region(output, mode=remapped['mode'], nodes=remapped['nodes'],
+                                segments=remapped['segments'], label=remapped['label'],
+                                style=remapped['style'], margin=remapped.get('margin', 0))
+        region_ids.add(identifier)
+    if return_regions:
+        return output, set(mapping.values()), region_ids
     return output, set(mapping.values())
 
 
 def cut_edges_to_rest(graph, selected_nodes):
     selected = set(selected_nodes)
-    edges = [(source, target) for source, target in graph.edges
+    edges = [(source, target, key) if graph.is_multigraph() else (source, target)
+             for source, target, key, _ in edge_records(graph)
              if (source in selected) != (target in selected)]
     graph.remove_edges_from(edges)
     return len(edges)
@@ -809,7 +944,7 @@ def pendant(graph, vertices, vertex_color=None, edge_color=0):
 
 @dataclass
 class EditorContext:
-    graph: nx.DiGraph
+    graph: nx.DiGraph | nx.MultiDiGraph
     selection: SelectionState
     box: Any
     interaction: Any = None
@@ -876,7 +1011,9 @@ def VertexGroupAction(function, shortcut=None, name=None, group='custom'):
 def EdgeAction(function, shortcut=None, name=None, group='custom'):
     def invoke(context):
         edge = next(iter(context.selection.edges))
-        return function(context.graph, (edge.source, edge.target))
+        identity = ((edge.source, edge.target, edge.key) if context.graph.is_multigraph()
+                    else (edge.source, edge.target))
+        return function(context.graph, identity)
     return ContextAction(invoke, shortcut,
                          lambda context: len(context.selection.edges) == 1 and not context.selection.nodes,
                          name or function.__name__, group)
@@ -887,7 +1024,10 @@ def builtin_editor_actions():
     def selected(context):
         return selected_vertices(context.selection)
 
-    can_transform = lambda context: len(selected(context)) >= 2
+    def transform_vertices(context):
+        return selected(context) or set(context.graph.nodes)
+
+    can_transform = lambda context: len(transform_vertices(context)) >= 2
 
     def add_pendants(context):
         interaction = context.interaction
@@ -918,7 +1058,7 @@ def builtin_editor_actions():
                description='Contract the selection.'),
         Action('builtin:fuse', 'Fuse', 'f', fuse_nearby,
                lambda context: bool(context.graph), library=True, group='edition',
-               description='Contract nearby vertices.'),
+               description='Identify vertices with the same position.'),
         Action('builtin:complement', 'Complement', None,
                lambda context: complement(context.graph, selected(context)),
                lambda context: True, library=True, group='edition'),
@@ -926,31 +1066,31 @@ def builtin_editor_actions():
                lambda context: bool(context.selection.nodes), library=True, group='edition',
                description='Add a pendant vertex.'),
         Action('builtin:rotate_left', 'Rotate left 10°', None,
-               lambda context: rotate(context.graph, selected(context), -10),
+               lambda context: rotate(context.graph, transform_vertices(context), -10),
                can_transform, library=True, group='basic',
                pair_id='transformation', pair_label='Transformation'),
         Action('builtin:rotate_right', 'Rotate right 10°', None,
-               lambda context: rotate(context.graph, selected(context), 10),
+               lambda context: rotate(context.graph, transform_vertices(context), 10),
                can_transform, library=True, group='basic',
                pair_id='transformation', pair_label='Transformation'),
         Action('builtin:flip_horizontal', 'Flip horizontally', None,
-               lambda context: flip_horizontal(context.graph, selected(context)),
+               lambda context: flip_horizontal(context.graph, transform_vertices(context)),
                can_transform, library=True, group='basic',
                pair_id='transformation', pair_label='Transformation'),
         Action('builtin:flip_vertical', 'Flip vertically', None,
-               lambda context: flip_vertical(context.graph, selected(context)),
+               lambda context: flip_vertical(context.graph, transform_vertices(context)),
                can_transform, library=True, group='basic',
                pair_id='transformation', pair_label='Transformation'),
         Action('builtin:half_turn', 'Central symmetry (180°)', None,
-               lambda context: rotate(context.graph, selected(context), 180),
+               lambda context: rotate(context.graph, transform_vertices(context), 180),
                can_transform, library=True, group='basic',
                pair_id='transformation', pair_label='Transformation'),
-        Action('builtin:grow', 'Grow selection ×1.1', None,
-               lambda context: scale_selection(context.graph, selected(context), 1.1),
+        Action('builtin:grow', 'Grow ×1.1', None,
+               lambda context: scale_selection(context.graph, transform_vertices(context), 1.1),
                can_transform, library=True, group='basic',
                pair_id='transformation', pair_label='Transformation'),
-        Action('builtin:shrink', 'Shrink selection ÷1.1', None,
-               lambda context: scale_selection(context.graph, selected(context), 1/1.1),
+        Action('builtin:shrink', 'Shrink ÷1.1', None,
+               lambda context: scale_selection(context.graph, transform_vertices(context), 1/1.1),
                can_transform, library=True, group='basic',
                pair_id='transformation', pair_label='Transformation'),
     )

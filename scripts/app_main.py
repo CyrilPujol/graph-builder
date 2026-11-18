@@ -9,4 +9,4 @@ if __name__ == '__main__':
         worker_from_files(sys.argv[2], sys.argv[3], sys.argv[4])
     else:
         from graph_builder import main
-        raise SystemExit(main(actions=[], untitled=True))
+        raise SystemExit(main(actions=[], untitled=True, tutorial_on_first_run=True))

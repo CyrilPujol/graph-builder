@@ -8,6 +8,7 @@ dist/
 .DS_Store
 # Personal development files stay on this computer.
 local/
+FEEDBACK.md
 
 # Default files created by an editor session
 graph.graphml

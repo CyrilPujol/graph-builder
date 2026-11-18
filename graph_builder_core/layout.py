@@ -130,7 +130,7 @@ def arrange_positions(graph, movable, iterations=80, spacing=110.0,
 
     layout_graph = nx.Graph()
     layout_graph.add_nodes_from(graph)
-    layout_graph.add_edges_from((u, v) for u, v in graph.edges if u != v)
+    layout_graph.add_edges_from((u, v) for u, v in graph.edges() if u != v)
     fixed = set(graph) - movable
     # Equal positions are common after importing or generating a graph.
     seen = {}

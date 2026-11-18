@@ -1,6 +1,6 @@
 """Build a self-contained Graph Builder download for the current operating system.
 
-Run from the repository root after ``python -m pip install --no-user -e '.[build]'``.
+Run from the repository root after ``python -m pip install --no-user -e '.[build,solver]'``.
 Builds must run separately on macOS, Windows, and Linux.
 """
 
@@ -127,6 +127,7 @@ def main():
         sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean',
         '--windowed', '--onedir', '--name', NAME, '--icon', str(icon),
         '--paths', str(ROOT),
+        '--hidden-import', 'ortools.sat.python.cp_model',
         '--distpath', str(DIST), '--workpath', str(BUILD / 'pyinstaller'),
         '--specpath', str(BUILD),
     ]

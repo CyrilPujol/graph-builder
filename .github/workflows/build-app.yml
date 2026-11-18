@@ -35,7 +35,7 @@ jobs:
             libxkbcommon-x11-0 libxcb-cursor0 libxcb-render-util0 \
             libxcb-util1 libxcb-icccm4 libxcb-keysyms1 libxcb-xkb1
       - name: Install app and packager
-        run: python -m pip install -e '.[build]'
+        run: python -m pip install -e '.[build,solver]'
       - name: Build and package
         run: python scripts/build_app.py
       - name: Smoke-test packaged app

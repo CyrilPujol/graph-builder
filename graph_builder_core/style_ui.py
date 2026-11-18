@@ -3,27 +3,24 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from PySide6.QtCore import Qt, QRectF, QSignalBlocker
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtCore import Qt, QSignalBlocker, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QColorDialog, QComboBox, QDialog, QDialogButtonBox,
     QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
-from .styles import (FIELDS, effective_style,
-                          contrast_text_color, reset_palette_style,
-                          set_overrides, set_palette_style)
+from .styles import (FIELDS, effective_style, has_custom_look,
+                     reset_palette_style, set_palette_style)
+from .regions import set_region_properties
 
 
 SPECS = {
     'vertex': {
         'fill': ('Fill', 'color'), 'outline': ('Outline', 'color'),
-        'shape': ('Shape', ('circle', 'square', 'diamond', 'triangle',
-                           'hollow_circle', 'hollow_square', 'hollow_diamond',
-                           'hollow_triangle', 'none')),
+        'shape': ('Shape', ('circle', 'square', 'diamond', 'triangle', 'none')),
         'size': ('Diameter', (4, 200, 1)),
         'outline_width': ('Outline width', (0, 20, .5)),
         'text': ('Text color', 'color'),
-        'latex_label': ('Label is LaTeX', (False, True)),
         'tikz_options': ('Extra TikZ node options', 'text'),
     },
     'edge': {
@@ -32,62 +29,131 @@ SPECS = {
         'opacity': ('Opacity', (0, 1, .05)),
         'label_t': ('Label position', (0, 1, .05)),
         'label_offset': ('Label offset', (-100, 100, 1)),
-        'latex_label': ('Label is LaTeX', (False, True)),
         'tikz_options': ('Extra TikZ draw options', 'text'),
     },
 }
 
 
-class StylePreview(QWidget):
-    def __init__(self, dialog):
-        super().__init__(dialog)
-        self.dialog = dialog
-        self.setMinimumHeight(74)
+class RegionPropertiesDialog(QDialog):
+    """Small editor for a region's label and independent appearance."""
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), QColor('#fafafa'))
-        style = self.dialog.preview_style()
-        middle = self.rect().center()
-        if self.dialog.kind == 'vertex':
-            size = min(float(style['size']), 55)
-            shape = style['shape']
-            fill = style['fill']
-            if shape.startswith('hollow_'):
-                fill = 'none'
-                shape = shape[7:]
-            painter.setBrush(Qt.NoBrush if fill == 'none' else QColor(fill))
-            painter.setPen(QPen(QColor(style['outline']), float(style['outline_width'])))
-            rect = QRectF(middle.x()-size/2, middle.y()-size/2, size, size)
-            if shape == 'circle':
-                painter.drawEllipse(rect)
-            elif shape == 'square':
-                painter.drawRect(rect)
-            elif shape in ('diamond', 'triangle'):
-                from PySide6.QtGui import QPolygonF
-                from PySide6.QtCore import QPointF
-                points = ([QPointF(middle.x(), rect.top()), QPointF(rect.right(), middle.y()),
-                           QPointF(middle.x(), rect.bottom()), QPointF(rect.left(), middle.y())]
-                          if shape == 'diamond' else
-                          [QPointF(middle.x(), rect.top()), QPointF(rect.right(), rect.bottom()),
-                           QPointF(rect.left(), rect.bottom())])
-                painter.drawPolygon(QPolygonF(points))
-            painter.setPen(QColor(style['text']) if style['text'] != 'auto' else QColor(contrast_text_color(fill)))
-            label = self.dialog.label_edit.text() if self.dialog.label_edit is not None else 'A'
-            painter.drawText(self.rect(), Qt.AlignCenter, label[:12])
+    preview_changed = Signal()
+
+    def __init__(self, region, graph, parent=None):
+        super().__init__(parent)
+        self._source_graph = graph
+        self._region_id = region['id']
+        self.setWindowTitle('Region properties')
+        self.setMinimumWidth(360)
+        layout = QVBoxLayout(self)
+        fields = QFormLayout()
+        self.label_edit = QLineEdit(str(region.get('label', '')))
+        fields.addRow('Label', self.label_edit)
+        self.mode = QComboBox()
+        self.mode.addItem('Convex hull', 'hull')
+        self.mode.addItem('Manual boundary', 'manual')
+        self.mode.setCurrentIndex(1 if region['mode'] == 'path' else 0)
+        fields.addRow('Boundary', self.mode)
+        self.mode_note = QLabel()
+        self.mode_note.setWordWrap(True)
+        fields.addRow('', self.mode_note)
+        self.mode.currentIndexChanged.connect(self._mode_changed)
+        self._mode_changed()
+        padding = QDoubleSpinBox()
+        padding.setRange(-200, 200)
+        padding.setSingleStep(2)
+        padding.setValue(float(region.get('margin', 0)))
+        padding.setToolTip('Positive padding expands the region, negative padding moves it inward. Applied after curves.')
+        fields.addRow('Padding', padding)
+        padding.valueChanged.connect(self.preview_changed)
+        self.controls = {}
+        self.controls['padding'] = padding
+        style = region['style']
+        for field, title in (('fill', 'Fill'), ('outline', 'Outline')):
+            control = QLineEdit(str(style[field]))
+            row = QHBoxLayout()
+            row.addWidget(control)
+            choose = QPushButton('…')
+            choose.setFixedWidth(30)
+            choose.clicked.connect(lambda _, box=control: self._choose_color(box))
+            row.addWidget(choose)
+            none = QPushButton('None')
+            none.clicked.connect(lambda _, box=control: box.setText('none'))
+            row.addWidget(none)
+            fields.addRow(title, row)
+            self.controls[field] = control
+            control.textChanged.connect(self.preview_changed)
+        width = QDoubleSpinBox()
+        width.setRange(0, 20)
+        width.setSingleStep(.5)
+        width.setValue(float(style['width']))
+        fields.addRow('Outline width', width)
+        width.valueChanged.connect(self.preview_changed)
+        self.controls['width'] = width
+        opacity = QDoubleSpinBox()
+        opacity.setRange(0, 1)
+        opacity.setSingleStep(.05)
+        opacity.setDecimals(2)
+        opacity.setValue(float(style['opacity']))
+        fields.addRow('Opacity', opacity)
+        opacity.valueChanged.connect(self.preview_changed)
+        self.controls['opacity'] = opacity
+        extra = QLineEdit(str(style.get('tikz_options', '')))
+        extra.setToolTip('Additional TikZ fill options. The canvas is an approximation.')
+        fields.addRow('Extra TikZ options', extra)
+        extra.textChanged.connect(self.preview_changed)
+        self.controls['tikz_options'] = extra
+        self.label_edit.textChanged.connect(self.preview_changed)
+        layout.addLayout(fields)
+        note = QLabel('The canvas approximates the TikZ look. Extra options may only appear in export and may fail to compile.')
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _choose_color(self, box):
+        color = QColorDialog.getColor(QColor(box.text()), self)
+        if color.isValid():
+            box.setText(color.name())
+
+    def _mode_changed(self):
+        if self.mode.currentData() == 'hull':
+            self.mode_note.setText('The boundary is the convex hull of its vertices and follows them when they move.')
         else:
-            pen = QPen(QColor(style['stroke']), float(style['width']))
-            pen.setStyle({'solid': Qt.SolidLine, 'dash': Qt.DashLine,
-                          'dot': Qt.DotLine, 'dashdot': Qt.DashDotLine}[style['pattern']])
-            painter.setOpacity(float(style['opacity']))
-            painter.setPen(pen)
-            painter.drawLine(25, middle.y(), self.width()-25, middle.y())
-        painter.end()
+            self.mode_note.setText('The boundary follows its vertex order or linked edges and can be reshaped with curve points.')
+        self.preview_changed.emit()
+
+    def values(self):
+        return {'label': self.label_edit.text(),
+                'mode': self.mode.currentData(),
+                'margin': self.controls['padding'].value(),
+                'style': {'fill': self.controls['fill'].text().strip(),
+                          'outline': self.controls['outline'].text().strip(),
+                          'width': self.controls['width'].value(),
+                          'opacity': self.controls['opacity'].value(),
+                          'tikz_options': self.controls['tikz_options'].text()}}
+
+    def _accept(self):
+        for field in ('fill', 'outline'):
+            value = self.controls[field].text().strip()
+            if value != 'none' and not QColor(value).isValid():
+                QMessageBox.warning(self, 'Invalid color',
+                                    f'{field.title()} must be a color or none.')
+                return
+        try:
+            set_region_properties(deepcopy(self._source_graph), self._region_id,
+                                  self.values())
+        except ValueError as error:
+            QMessageBox.warning(self, 'Invalid region boundary', str(error))
+            return
+        self.accept()
 
 
 class PropertiesDialog(QDialog):
     advanced_open = False
+    preview_changed = Signal()
 
     def __init__(self, graph, kind, attributes, *, bulk=False, style_only=False,
                  parent=None):
@@ -97,6 +163,7 @@ class PropertiesDialog(QDialog):
         self.bulk, self.style_only = bulk, style_only
         self.type_delta = 0
         self.look_mode = None
+        self.custom_look_notice = None
         self._look_touched = False
         self.shared_style_update = None
         self._applying_to_type = False
@@ -108,11 +175,12 @@ class PropertiesDialog(QDialog):
             label_row = QHBoxLayout()
             label_row.addWidget(QLabel('Label'))
             self.label_edit = QLineEdit(str(self.attributes[0].get('label', '')))
+            self.label_edit.setToolTip('TikZ exports use LaTeX labels. Write $x_1$ for a subscript or \\# for a literal #.')
             label_row.addWidget(self.label_edit)
             layout.addLayout(label_row)
         if not style_only:
             type_row = QHBoxLayout()
-            type_row.addWidget(QLabel('Type'))
+            type_row.addWidget(QLabel('Style'))
             self.type_label = QLabel()
             type_row.addWidget(self.type_label, 1)
             step = QWidget()
@@ -132,6 +200,18 @@ class PropertiesDialog(QDialog):
             type_row.addWidget(step)
             layout.addLayout(type_row)
             self._update_type_label()
+            if any(has_custom_look(item) for item in self.attributes):
+                object_name = 'vertices' if kind == 'vertex' else 'edges'
+                if bulk:
+                    message = (f'Some selected {object_name} have custom looks. '
+                               'A style change may not affect their whole appearance.')
+                else:
+                    object_name = 'vertex' if kind == 'vertex' else 'edge'
+                    message = (f'This {object_name} has a custom look. '
+                               'A style change may not affect its whole appearance.')
+                self.custom_look_notice = QLabel(message)
+                self.custom_look_notice.setWordWrap(True)
+                layout.addWidget(self.custom_look_notice)
         toggle = QPushButton('Style ▾', self)
         self.advanced_toggle = toggle
         toggle.setCheckable(True)
@@ -154,38 +234,39 @@ class PropertiesDialog(QDialog):
                         else 'inherit')
                 self.look_mode.setCurrentIndex(self.look_mode.findData(mode))
             advanced_layout.addWidget(self.look_mode)
-            self.apply_type_button = QPushButton('Apply look to whole type')
+            self.apply_type_button = QPushButton('Apply look to basic style')
             self.apply_type_button.clicked.connect(self.apply_look_to_type)
             advanced_layout.addWidget(self.apply_type_button, 0, Qt.AlignLeft)
-        self.preview = StylePreview(self)
-        advanced_layout.addWidget(self.preview)
         self.controls = {}
         self.edit_widgets = []
         if self.label_edit is not None:
-            self.label_edit.textChanged.connect(self.preview.update)
+            self.label_edit.textChanged.connect(self.preview_changed)
         fields = QFormLayout()
         for field in FIELDS[kind]:
             title, spec = SPECS[kind][field]
             row = QHBoxLayout()
-            current = effective_style(graph, kind, self.attributes[0])[field]
+            style = effective_style(graph, kind, self.attributes[0])
+            current = self._display_value(field, style)
             if spec == 'color':
                 value = QLineEdit(str(current))
-                value.setPlaceholderText('Hex color' + (', none' if field == 'fill' else ', auto' if field == 'text' else ''))
+                value.setPlaceholderText('Hex color' + (', none' if field in ('fill', 'outline') else
+                                                        ', auto' if field == 'text' else ''))
                 choose = QPushButton('…')
                 choose.setFixedWidth(30)
                 choose.clicked.connect(lambda _, box=value: self._choose_color(box))
                 row.addWidget(value)
                 row.addWidget(choose)
                 self.edit_widgets.append(choose)
-                if field in ('fill', 'text'):
-                    special = QPushButton('None' if field == 'fill' else 'Auto')
-                    special.clicked.connect(lambda _, box=value, choice='none' if field == 'fill' else 'auto': box.setText(choice))
+                if field in ('fill', 'outline', 'text'):
+                    special = QPushButton('Auto' if field == 'text' else 'None')
+                    special.clicked.connect(lambda _, box=value, choice='auto' if field == 'text' else 'none': box.setText(choice))
                     row.addWidget(special)
                     self.edit_widgets.append(special)
-                value.textChanged.connect(self.preview.update)
+                value.textChanged.connect(self.preview_changed)
             elif spec == 'text':
                 value = QLineEdit(str(current))
                 row.addWidget(value)
+                value.textChanged.connect(self.preview_changed)
             elif isinstance(spec, tuple) and len(spec) == 3 and all(isinstance(x, (int, float)) for x in spec):
                 value = QDoubleSpinBox()
                 value.setRange(spec[0], spec[1])
@@ -193,14 +274,14 @@ class PropertiesDialog(QDialog):
                 value.setDecimals(2)
                 value.setValue(float(current))
                 row.addWidget(value)
-                value.valueChanged.connect(self.preview.update)
+                value.valueChanged.connect(self.preview_changed)
             else:
                 value = QComboBox()
                 for choice in spec:
                     value.addItem(str(choice).replace('_', ' ').title(), choice)
                 value.setCurrentIndex(max(0, value.findData(current)))
                 row.addWidget(value)
-                value.currentIndexChanged.connect(self.preview.update)
+                value.currentIndexChanged.connect(self.preview_changed)
             self.controls[field] = value
             self.edit_widgets.append(value)
             fields.addRow(title, row)
@@ -209,7 +290,7 @@ class PropertiesDialog(QDialog):
         self.advanced_widget = advanced_widget
         layout.addWidget(advanced_widget)
         advanced_widget.setVisible(style_only or PropertiesDialog.advanced_open)
-        note = QLabel('Canvas preview is approximate. Extra TikZ options are exported verbatim and may fail to compile.')
+        note = QLabel('Canvas rendering is approximate. Extra TikZ options are exported verbatim and may fail to compile.')
         note.setWordWrap(True)
         advanced_layout.addWidget(note)
         if self.look_mode is not None:
@@ -234,11 +315,21 @@ class PropertiesDialog(QDialog):
         self.layout().activate()
         self.resize(self.width(), self.sizeHint().height())
 
+    @staticmethod
+    def _display_value(field, style):
+        # Older files may still use hollow_* shapes. Present them using the
+        # equivalent ordinary shape and transparent fill controls.
+        if field == 'shape' and str(style['shape']).startswith('hollow_'):
+            return style['shape'][7:]
+        if field == 'fill' and str(style['shape']).startswith('hollow_'):
+            return 'none'
+        return style[field]
+
     def _inherit_text(self):
         indices = {int(item.get('col', 0)) for item in self.attributes}
         if len(indices) == 1:
-            return f'Inherit from type {(next(iter(indices)) + self.type_delta) % self._type_count()}'
-        return 'Inherit from each type'
+            return f'Inherit from style {(next(iter(indices)) + self.type_delta) % self._type_count()}'
+        return 'Inherit from each style'
 
     def _type_count(self):
         return max(1, int(self.graph.graph.get(
@@ -260,21 +351,22 @@ class PropertiesDialog(QDialog):
         self.type_delta += delta
         self._update_type_label()
         self._refresh_readonly_controls()
-        self.preview.update()
+        self.preview_changed.emit()
 
     def _sync_look(self):
         mode = self.look_mode.currentData()
+        if self.custom_look_notice is not None:
+            self.custom_look_notice.setVisible(mode != 'inherit')
         if mode != 'inherit' and not self._applying_to_type:
             self._clear_pending_type_style()
         for widget in self.edit_widgets:
             widget.setEnabled(mode == 'custom')
         self.apply_type_button.setEnabled(mode == 'custom' and len(set(self.type_values())) == 1)
         self._refresh_readonly_controls()
-        self.preview.update()
 
     def _mark_look_touched(self, *_):
         self._look_touched = True
-        self.preview.update()
+        self.preview_changed.emit()
 
     def _refresh_readonly_controls(self):
         if self.look_mode is None or self.look_mode.currentData() != 'inherit':
@@ -286,7 +378,7 @@ class PropertiesDialog(QDialog):
         style = effective_style(self.graph, self.kind, attributes)
         for field, widget in self.controls.items():
             blocker = QSignalBlocker(widget)
-            value = style[field]
+            value = self._display_value(field, style)
             if isinstance(widget, QComboBox):
                 widget.setCurrentIndex(max(0, widget.findData(value)))
             elif isinstance(widget, QDoubleSpinBox):
@@ -335,21 +427,12 @@ class PropertiesDialog(QDialog):
         self.look_mode.setCurrentIndex(self.look_mode.findData('inherit'))
         self._applying_to_type = False
         self._look_touched = True
-        self.preview.update()
+        self.preview_changed.emit()
 
     def _control_values(self):
         return {field: (widget.currentData() if isinstance(widget, QComboBox) else
                         widget.value() if isinstance(widget, QDoubleSpinBox) else widget.text().strip())
                 for field, widget in self.controls.items()}
-
-    def preview_style(self):
-        attributes = deepcopy(self.attributes[0])
-        if not self.style_only:
-            attributes['col'] = self.type_values()[0]
-        if self.clear_preset():
-            attributes.pop('style_preset', None)
-        set_overrides(attributes, self.changes())
-        return effective_style(self.graph, self.kind, attributes)
 
     def _accept(self):
         if self.look_mode is not None and self.look_mode.currentData() != 'custom':
@@ -358,34 +441,36 @@ class PropertiesDialog(QDialog):
         if self._valid_colors(self.changes()):
             self.accept()
 
-    def _valid_colors(self, changes):
+    def _valid_colors(self, changes, *, warn=True):
         for field in ('fill', 'outline', 'text', 'stroke'):
             value = changes.get(field)
-            special = (value == 'auto' and field == 'text') or (value == 'none' and field == 'fill')
+            special = (value == 'auto' and field == 'text') or (value == 'none' and field in ('fill', 'outline'))
             if value is not None and not special and not (isinstance(value, str) and
                     len(value) == 7 and value.startswith('#') and QColor(value).isValid()):
-                QMessageBox.warning(self, 'Invalid color', f'{field}: enter a #RRGGBB color or the offered special value.')
+                if warn:
+                    QMessageBox.warning(self, 'Invalid color', f'{field}: enter a #RRGGBB color or the offered special value.')
                 return False
         return True
 
 
 class StylesDialog(QDialog):
-    """Browse and edit shared type styles in a single movable dialog."""
+    """Browse and edit shared basic styles in a single movable dialog."""
+    preview_changed = Signal()
     def __init__(self, graph, parent=None):
         super().__init__(parent)
         self.graph = deepcopy(graph)
-        self.setWindowTitle('Type styles')
+        self.setWindowTitle('Basic styles')
         layout = QVBoxLayout(self)
         self.kind = QComboBox()
         self.kind.addItems(('vertex', 'edge'))
         layout.addWidget(self.kind)
         slot_row = QHBoxLayout()
-        slot_row.addWidget(QLabel('Type index'))
+        slot_row.addWidget(QLabel('Style number'))
         self.slot = QSpinBox()
         self.slot.setMinimum(0)
         slot_row.addWidget(self.slot)
-        self.reset_button = QPushButton('Reset this type')
-        self.reset_button.setToolTip('Restore the built-in style for this type. Individual custom looks stay unchanged.')
+        self.reset_button = QPushButton('Reset this style')
+        self.reset_button.setToolTip('Restore this built-in style. Individual custom looks stay unchanged.')
         self.reset_button.clicked.connect(self._reset_current_type)
         slot_row.addWidget(self.reset_button)
         layout.addLayout(slot_row)
@@ -394,6 +479,7 @@ class StylesDialog(QDialog):
         self.refresh()
         self.editor = self._create_editor()
         layout.addWidget(self.editor)
+        self.editor.preview_changed.connect(self.preview_changed)
         self._initial_values = self.editor._control_values()
         self.kind.currentIndexChanged.connect(self._switch_kind)
         self.slot.valueChanged.connect(self._switch_type)
@@ -433,6 +519,14 @@ class StylesDialog(QDialog):
         reset_palette_style(self.graph, self._current_kind, self._current_index)
         self._switch_type(self._current_index)
 
+    def preview_graph(self):
+        graph = deepcopy(self.graph)
+        values = self.editor._control_values()
+        if not self.editor._valid_colors(values, warn=False):
+            return None
+        set_palette_style(graph, self._current_kind, self._current_index, values)
+        return graph
+
     def _switch_type(self, index):
         if not self._save_current_type():
             with QSignalBlocker(self.slot):
@@ -444,7 +538,7 @@ class StylesDialog(QDialog):
         style = effective_style(self.graph, self._current_kind, self.editor.attributes[0])
         for field, widget in self.editor.controls.items():
             with QSignalBlocker(widget):
-                value = style[field]
+                value = self.editor._display_value(field, style)
                 if isinstance(widget, QComboBox):
                     widget.setCurrentIndex(max(0, widget.findData(value)))
                 elif isinstance(widget, QDoubleSpinBox):
@@ -452,7 +546,7 @@ class StylesDialog(QDialog):
                 else:
                     widget.setText(str(value))
         self._initial_values = self.editor._control_values()
-        self.editor.preview.update()
+        self.preview_changed.emit()
 
     def _switch_kind(self):
         if not self._save_current_type():
@@ -464,12 +558,14 @@ class StylesDialog(QDialog):
         self._current_index = self.slot.value()
         previous = self.editor
         self.editor = self._create_editor()
+        self.editor.preview_changed.connect(self.preview_changed)
         self.layout().replaceWidget(previous, self.editor)
         previous.hide()
         previous.deleteLater()
         self._initial_values = self.editor._control_values()
         self.layout().activate()
         self.resize(max(self.width(), self.sizeHint().width()), self.sizeHint().height())
+        self.preview_changed.emit()
 
     def _accept(self):
         if self._save_current_type():

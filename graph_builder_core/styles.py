@@ -6,13 +6,14 @@ from copy import deepcopy
 from math import hypot
 
 from .lib import colormap_1
+from .edges import edge_data
 
 
 FIELDS = {
     'vertex': ('fill', 'outline', 'shape', 'size', 'outline_width', 'text',
-               'latex_label', 'tikz_options'),
+               'tikz_options'),
     'edge': ('stroke', 'width', 'pattern', 'opacity', 'label_t',
-             'label_offset', 'latex_label', 'tikz_options'),
+             'label_offset', 'tikz_options'),
 }
 
 DEFAULT_PRESET_ID = '__default_style__'
@@ -20,10 +21,15 @@ DEFAULT_PRESET_ID = '__default_style__'
 
 def _read(value):
     if isinstance(value, dict):
-        return deepcopy(value)
+        result = deepcopy(value)
+        result.pop('latex_label', None)
+        return result
     try:
         result = json.loads(value or '{}')
-        return result if isinstance(result, dict) else {}
+        if isinstance(result, dict):
+            result.pop('latex_label', None)
+            return result
+        return {}
     except (TypeError, ValueError):
         return {}
 
@@ -37,13 +43,13 @@ def base_style(kind, color_index):
     if kind == 'vertex':
         if int(color_index) == 0:
             return dict(fill='#ffffff', outline='#000000', shape='circle', size=34.0,
-                        outline_width=2.0, text='auto', latex_label=False,
+                        outline_width=2.0, text='auto',
                         tikz_options='')
         return dict(fill=color, outline='#222222', shape='circle', size=34.0,
-                    outline_width=1.5, text='auto', latex_label=False,
+                    outline_width=1.5, text='auto',
                     tikz_options='')
     return dict(stroke=color, width=2.6, pattern='solid', opacity=1.0,
-                label_t=.5, label_offset=0.0, latex_label=False,
+                label_t=.5, label_offset=0.0,
                 tikz_options='')
 
 
@@ -104,6 +110,13 @@ def effective_style(graph, kind, attributes):
     return style
 
 
+def has_custom_look(attributes):
+    """Whether an object's own style can override its basic style's appearance."""
+    preset = attributes.get('style_preset')
+    return bool(_read(attributes.get('style_overrides'))) or bool(
+        preset and preset != DEFAULT_PRESET_ID)
+
+
 def set_overrides(attributes, changes):
     """None removes an override, other values replace it."""
     overrides = _read(attributes.get('style_overrides'))
@@ -125,7 +138,7 @@ def set_palette_style(graph, kind, index, style):
 
 
 def reset_palette_style(graph, kind, index):
-    """Remove a type's shared customization and restore its built-in look."""
+    """Remove a basic style's shared customization and restore its built-in look."""
     values = palette_styles(graph, kind)
     values.pop(str(index), None)
     if values:
@@ -172,13 +185,35 @@ def paste_style(attributes, snapshot):
     set_overrides(attributes, snapshot)
 
 
-def set_edge_style(graph, source, target, changes, preset=None):
+def use_basic_style(attributes, index):
+    """Assign a shared style, discarding object-specific appearance only.
+
+    Labels and unrelated attributes are intentionally left alone.
+    """
+    attributes['col'] = int(index)
+    attributes.pop('style_overrides', None)
+    attributes.pop('style_preset', None)
+
+
+def basic_index_for_appearance(graph, kind, appearance):
+    """Find or append an inherited style matching an effective appearance."""
+    count_key = 'num_vertex_colors' if kind == 'vertex' else 'num_edge_colors'
+    count = max(1, int(graph.graph.get(count_key, 1)))
+    for index in range(count):
+        if effective_style(graph, kind, {'col': index}) == appearance:
+            return index
+    set_palette_style(graph, kind, count, appearance)
+    graph.graph[count_key] = count + 1
+    return count
+
+
+def set_edge_style(graph, source, target, changes, preset=None, key=None):
     """Keep the two arcs of a logical undirected edge synchronized."""
     pairs = [(source, target)]
     if graph.graph.get('graph_type') == 'graph' and graph.has_edge(target, source):
         pairs.append((target, source))
     for pair in pairs:
-        attributes = graph.edges[pair]
+        attributes = edge_data(graph, *pair, key)
         set_overrides(attributes, changes)
         if preset is not None:
             if preset:
