@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import subprocess
 import tarfile
 import tempfile
@@ -11,7 +12,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from build_app import _platform_details
+from build_app import MACOS_GRAPHML_TYPE, _platform_details
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +44,35 @@ def main():
             executable = extracted / 'Graph Builder/Graph Builder'
         if not executable.is_file():
             raise RuntimeError(f'No executable in archive at {executable}')
+        if system == 'macOS':
+            plist_path = extracted / 'Graph Builder.app/Contents/Info.plist'
+            with plist_path.open('rb') as source:
+                metadata = plistlib.load(source)
+            document_types = metadata.get('CFBundleDocumentTypes', ())
+            if not any('graphml' in item.get('CFBundleTypeExtensions', ())
+                       for item in document_types):
+                raise RuntimeError('macOS bundle does not declare GraphML support.')
+            if not any(item.get('CFBundleTypeIconFile') == 'graphml_document.icns'
+                       for item in document_types):
+                raise RuntimeError('macOS bundle does not declare a GraphML icon.')
+            if not any(MACOS_GRAPHML_TYPE in item.get('LSItemContentTypes', ())
+                       for item in document_types):
+                raise RuntimeError('macOS bundle does not claim its GraphML content type.')
+            imported = metadata.get('UTImportedTypeDeclarations', ())
+            if not any(item.get('UTTypeIdentifier') == MACOS_GRAPHML_TYPE
+                       and item.get('UTTypeIconFile') == 'graphml_document.icns'
+                       for item in imported):
+                raise RuntimeError('macOS bundle does not define its GraphML content type.')
+            if not (extracted / 'Graph Builder.app/Contents/Resources/graphml_document.icns').is_file():
+                raise RuntimeError('macOS bundle is missing its GraphML icon.')
+        if system == 'Linux':
+            folder = extracted / 'Graph Builder'
+            if not (folder / 'Install desktop integration.sh').is_file():
+                raise RuntimeError('Linux download is missing desktop integration.')
+            if not (folder / 'graph_builder.png').is_file():
+                raise RuntimeError('Linux download is missing its desktop icon.')
+            if not (folder / 'graphml_document.png').is_file():
+                raise RuntimeError('Linux download is missing its GraphML document icon.')
         process = subprocess.Popen([str(executable)], cwd=directory,
                                    env=environment, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)

@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / 'local/build'
 DIST = ROOT / 'local/dist'
 NAME = 'Graph Builder'
+MACOS_BUNDLE_ID = 'org.cyrilpujol.graphbuilder'
+MACOS_GRAPHML_TYPE = 'org.cyrilpujol.graphbuilder.graphml'
 LINUX_GRAPHICS_LIBRARIES = (
     'libEGL.so.1', 'libGL.so.1', 'libGLX.so.0',
     'libGLdispatch.so.0', 'libOpenGL.so.0', 'libGLESv2.so.2',
@@ -127,6 +129,54 @@ def _archive(folder: Path, destination: Path, system: str):
                     archive.write(item, item.relative_to(DIST))
 
 
+def _add_macos_graphml_type(spec_path):
+    """Register GraphML in PyInstaller's bundle before its ad-hoc signing."""
+    source = spec_path.read_text(encoding='utf-8')
+    marker = f'    bundle_identifier={MACOS_BUNDLE_ID!r},\n'
+    if source.count(marker) != 1:
+        raise RuntimeError('PyInstaller did not generate the expected macOS bundle entry.')
+    document_type = (
+        "    info_plist={'CFBundleDocumentTypes': [{\n"
+        "        'CFBundleTypeName': 'GraphML document',\n"
+        "        'CFBundleTypeExtensions': ['graphml'],\n"
+        f"        'LSItemContentTypes': [{MACOS_GRAPHML_TYPE!r}],\n"
+        "        'CFBundleTypeIconFile': 'graphml_document.icns',\n"
+        "        'CFBundleTypeRole': 'Editor',\n"
+        "        'LSHandlerRank': 'Alternate',\n"
+        "    }], 'UTImportedTypeDeclarations': [{\n"
+        f"        'UTTypeIdentifier': {MACOS_GRAPHML_TYPE!r},\n"
+        "        'UTTypeDescription': 'GraphML graph',\n"
+        "        'UTTypeIconFile': 'graphml_document.icns',\n"
+        "        'UTTypeConformsTo': ['public.xml'],\n"
+        "        'UTTypeTagSpecification': {\n"
+        "            'public.filename-extension': ['graphml'],\n"
+        "            'public.mime-type': ['application/graphml+xml'],\n"
+        "        },\n"
+        "    }]},\n"
+    )
+    spec_path.write_text(source.replace(marker, marker + document_type), encoding='utf-8')
+
+
+def _build_macos_app(icon, environment):
+    """Use a spec so document types are present before the bundle is signed."""
+    spec_command = [
+        sys.executable, '-m', 'PyInstaller.utils.cliutils.makespec',
+        '--windowed', '--onedir', '--name', NAME, '--icon', str(icon),
+        '--add-data', f'{ROOT / "assets/icons/graphml_document.icns"}:.',
+        '--paths', str(ROOT), '--hidden-import', 'ortools.sat.python.cp_model',
+        '--osx-bundle-identifier', MACOS_BUNDLE_ID,
+        '--specpath', str(BUILD), str(ROOT / 'scripts/app_main.py'),
+    ]
+    subprocess.run(spec_command, check=True, cwd=ROOT, env=environment)
+    spec_path = BUILD / f'{NAME}.spec'
+    _add_macos_graphml_type(spec_path)
+    subprocess.run([
+        sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean',
+        '--distpath', str(DIST), '--workpath', str(BUILD / 'pyinstaller'),
+        str(spec_path),
+    ], check=True, cwd=ROOT, env=environment)
+
+
 def main():
     system, architecture, icon = _platform_details()
     BUILD.mkdir(parents=True, exist_ok=True)
@@ -149,12 +199,25 @@ def main():
         for name in LINUX_GRAPHICS_LIBRARIES:
             command.extend(('--add-binary', f'{_linux_shared_library(name, library_cache)}:.'))
     command.append(str(ROOT / 'scripts/app_main.py'))
-    subprocess.run(command, check=True, cwd=ROOT, env=build_environment)
+    if system == 'macOS':
+        _build_macos_app(icon, build_environment)
+    else:
+        subprocess.run(command, check=True, cwd=ROOT, env=build_environment)
 
     built = DIST / (NAME + '.app' if system == 'macOS' else NAME)
     if not built.exists():
         raise RuntimeError(f'Build completed without expected output: {built}')
+    if system == 'Windows':
+        shutil.copy2(ROOT / 'scripts/install_windows_desktop.ps1',
+                     built / 'Install desktop integration.ps1')
+        shutil.copy2(ROOT / 'assets/icons/graphml_document.ico',
+                     built / 'graphml_document.ico')
     if system == 'Linux':
+        shutil.copy2(ROOT / 'scripts/install_linux_desktop.sh',
+                     built / 'Install desktop integration.sh')
+        shutil.copy2(icon, built / 'graph_builder.png')
+        shutil.copy2(ROOT / 'assets/icons/graphml_document.png',
+                     built / 'graphml_document.png')
         present = _bundle_linux_dependencies(built)
         required = set(LINUX_GRAPHICS_LIBRARIES) | {
             'libxcb-image.so.0', 'libxcb-shape.so.0',
