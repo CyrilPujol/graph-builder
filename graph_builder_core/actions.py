@@ -38,7 +38,7 @@ class Action:
     pair_label: str | Callable[[EditorContext], str] | None = None
     pair_id: str | None = None
     description: str | None = None
-    selections: int = 1
+    selection_types: tuple = ()
 
     def is_available(self, context):
         return bool(self.available(context))

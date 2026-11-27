@@ -13,6 +13,7 @@ from graph_builder_core.algorithms.metrics import BOUND_PROBLEMS, INFO_DEFINITIO
 from graph_builder_core.ui.icons import _gear_icon, _search_icon, _transformation_icon
 from graph_builder_core.ui.extension_menus import build_extension_menu
 from graph_builder_core.ui.picture_preview import PicturePreview
+from graph_builder_core.ui.tikz_preview import TikzPreview
 from graph_builder_core.ui.tutorial import TutorialPanel
 from graph_builder_core.ui.widgets import CollapsibleTabWidget, StepControl
 from graph_builder_core.version import APP_VERSION
@@ -78,6 +79,7 @@ class MenusController:
                 QToolBar QLabel { color: #111111; }
                 QToolBar QLabel:disabled { color: #777d84; }
                 QToolBar > QToolButton { border: 1px solid #d0d4d9; border-radius: 4px;
+                                       min-height: 20px; max-height: 20px;
                                        color: #111111; background: #f5f6f7;
                                        padding: 4px 7px; margin-right: 3px; }
                 QToolBar > QToolButton:hover:enabled { background: #e6ecee; }
@@ -103,10 +105,17 @@ class MenusController:
         tabs.tabBar().setTabButton(0, QTabBar.LeftSide, left_utilities)
 
         basic_row = row('Edition', (self.undo_action, self.redo_action,
-                                  self.copy_action, self.paste_action,
-                                  self.select_all_action, self.select_colors_action,
-                                  self.select_neighbours_action,
-                                  self.delete_action))
+                                  self.copy_action, self.paste_action))
+        from graph_builder_core.ui.widgets import menu_button
+        self.selection_menu = QMenu(basic_row)
+        self.selection_menu.setToolTipsVisible(True)
+        self.selection_menu.addActions((self.select_all_action, self.select_colors_action,
+                                        self.select_neighbours_action, self.select_complement_action,
+                                        self.lasso_selection_action, self.touch_selection_action))
+        self.selection_button = menu_button('Select', self.selection_menu, basic_row)
+        self.selection_button.setToolTip('Select vertices, edges, or regions')
+        basic_row.addWidget(self.selection_button)
+        basic_row.addAction(self.delete_action)
         self.paired_extension_controls = []
         self.transformation_controls = []
         for definition, action in self.extension_actions:
@@ -173,6 +182,7 @@ class MenusController:
                                      if definition.group == 'edition' and not definition.pair_id))
         edition_row.addSeparator()
         product_menu = QMenu(edition_row)
+        product_menu.setToolTipsVisible(True)
         product_menu.addActions(tuple(self.product_actions.values()))
         self.product_button = QToolButton(edition_row)
         self.product_button.setText('Product')
@@ -581,9 +591,18 @@ class MenusController:
         self.picture_dock.setWidget(self.picture_preview)
         self.addDockWidget(Qt.RightDockWidgetArea, self.picture_dock)
         self.picture_dock.hide()
+        self.tikz_dock = QDockWidget('TikZ preview', self)
+        self.tikz_dock.setAllowedAreas(Qt.RightDockWidgetArea)
+        self.tikz_dock.setMinimumWidth(380)
+        self.tikz_preview = TikzPreview(self.tikz_dock)
+        self.tikz_preview.save_requested.connect(self._save_tikz_preview)
+        self.tikz_dock.setWidget(self.tikz_preview)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.tikz_dock)
+        self.tikz_dock.hide()
         self.add_curve_action.triggered.connect(
             lambda checked=False: self._observe_tutorial('curve_edge'))
         tabs.tabBarClicked.connect(self._observe_tutorial_menu)
+        tabs.tabBarClicked.connect(lambda _: self.view.cancel_selection_tool())
         self.help_button.clicked.connect(self.toggle_help)
         # Actions in inactive tabs still need their keyboard shortcuts active.
         for _, action in self._shortcut_registry.values():

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 
 from graph_builder_core.model.regions import set_region_properties
 from graph_builder_core.model.styles import (
-    FIELDS, contrast_text_color, effective_style, has_custom_look, reset_palette_style,
+    FIELDS, vertex_text_color, effective_style, has_custom_look, reset_palette_style,
     set_palette_style,
 )
 from graph_builder_core.ui.items import draw_vertex_body, edge_arrow_path, edge_pen
@@ -26,6 +26,7 @@ SPECS = {
         'size': ('Diameter', (4, 200, 1)),
         'outline_width': ('Outline width', (0, 20, .5)),
         'text': ('Text color', 'color'),
+        'show_label': ('Label visibility', 'bool'),
         'tikz_options': ('Extra TikZ node options', 'text'),
     },
     'edge': {
@@ -284,6 +285,18 @@ class PropertiesDialog(QDialog):
                     special = QPushButton('Auto' if field == 'text' else 'None')
                     special.clicked.connect(lambda _, box=value, choice='auto' if field == 'text' else 'none': box.setText(choice))
                     row.addWidget(special)
+            elif spec == 'bool':
+                value = QComboBox()
+                value.addItem('Visible', True)
+                value.addItem('Hidden', False)
+                mixed = bulk and len({effective_style(graph, kind, item)[field]
+                                      for item in self.attributes}) > 1
+                if mixed:
+                    value.insertItem(0, 'Mixed', None)
+                    value.setCurrentIndex(0)
+                else:
+                    value.setCurrentIndex(value.findData(current))
+                row.addWidget(value)
             elif spec == 'text':
                 value = QLineEdit(str(current))
                 row.addWidget(value)
@@ -515,13 +528,13 @@ class BasicStyleSample(QWidget):
             painter.scale(min(1, 82 / max(1, float(style['size']))),
                           min(1, 82 / max(1, float(style['size']))))
             fill = draw_vertex_body(painter, style)
-            color = style['text']
-            if color == 'auto':
-                color = (self.palette().color(QPalette.Text).name()
-                         if fill == 'none' else contrast_text_color(fill))
+            color = vertex_text_color(style)
+            if style['text'] == 'auto' and style['shape'] != 'none' and fill == 'none':
+                color = self.palette().color(QPalette.Text).name()
             painter.setPen(QColor(color))
-            painter.drawText(QRectF(-40, -20, 80, 40), Qt.AlignCenter,
-                             str(self.dialog._current_index))
+            if style['show_label']:
+                painter.drawText(QRectF(-40, -20, 80, 40), Qt.AlignCenter,
+                                 str(self.dialog._current_index))
             painter.restore()
         else:
             stroke = style['stroke']

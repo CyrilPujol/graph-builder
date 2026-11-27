@@ -1,17 +1,19 @@
 """Export positioned NetworkX graphs as standalone TikZ picture contents."""
 from __future__ import annotations
 
-from math import atan2, cos, hypot, pi, sin, tan
+from math import atan2, cos, hypot, pi, sin
 from pathlib import Path
 import re
 
-from graph_builder_core.geometry.curves import _edge_curve_points, _loop_controls, edge_samples
+from graph_builder_core.geometry.curves import (
+    _edge_curve_points, _loop_controls, curve_cubics, edge_samples, visible_edge_cubics,
+)
 from graph_builder_core.geometry.polygons import _hull
 from graph_builder_core.model.document import labels_visible
 from graph_builder_core.model.edges import visible_edges
 from graph_builder_core.model.palette import colormap_1
 from graph_builder_core.model.regions import line_controls, region_polygons, regions
-from graph_builder_core.model.styles import contrast_text_color, effective_style
+from graph_builder_core.model.styles import effective_style, vertex_text_color as _vertex_text_color
 
 
 # The canvas default is 34 units wide and roughly twice the label's height.
@@ -31,48 +33,14 @@ def _number(value, places=3):
 
 def _curve_commands(start, end, controls, coordinate, endpoint):
     """Describe the canvas's circular arc or Catmull–Rom spline as TikZ cubics."""
-    points = [tuple(start), *(tuple(point) for point in controls), tuple(end)]
-    cubics = []
-    if len(controls) == 1:
-        a, middle, b = points
-        ax, ay = a
-        mx, my = middle
-        bx, by = b
-        determinant = 2 * (ax*(my-by) + mx*(by-ay) + bx*(ay-my))
-        if abs(determinant) > 1e-9:
-            center_x = ((ax*ax+ay*ay)*(my-by) + (mx*mx+my*my)*(by-ay)
-                        + (bx*bx+by*by)*(ay-my)) / determinant
-            center_y = ((ax*ax+ay*ay)*(bx-mx) + (mx*mx+my*my)*(ax-bx)
-                        + (bx*bx+by*by)*(mx-ax)) / determinant
-            radius = ((ax-center_x)**2 + (ay-center_y)**2)**.5
-            first = atan2(ay-center_y, ax-center_x)
-            via = atan2(my-center_y, mx-center_x)
-            last = atan2(by-center_y, bx-center_x)
-            positive = (last-first) % (2*pi)
-            sweep = positive if (via-first) % (2*pi) <= positive else positive - 2*pi
-            count = max(1, int(abs(sweep) / (pi/2)) + (abs(sweep) % (pi/2) > 1e-9))
-            for index in range(count):
-                angle = first + sweep*index/count
-                next_angle = first + sweep*(index+1)/count
-                delta = next_angle-angle
-                factor = 4*radius*tan(delta/4)/3
-                p0 = (center_x+radius*cos(angle), center_y+radius*sin(angle))
-                p3 = (center_x+radius*cos(next_angle), center_y+radius*sin(next_angle))
-                c1 = (p0[0]-factor*sin(angle), p0[1]+factor*cos(angle))
-                c2 = (p3[0]+factor*sin(next_angle), p3[1]-factor*cos(next_angle))
-                cubics.append((c1, c2, p3))
-    elif len(controls) > 1:
-        for index in range(len(points)-1):
-            p0, p1 = points[max(0, index-1)], points[index]
-            p2, p3 = points[index+1], points[min(len(points)-1, index+2)]
-            c1 = tuple(p1[axis] + (p2[axis]-p0[axis])/6 for axis in (0, 1))
-            c2 = tuple(p2[axis] - (p3[axis]-p1[axis])/6 for axis in (0, 1))
-            cubics.append((c1, c2, p2))
-    if not cubics:
+    if not controls or (len(controls) == 1 and abs(
+            (controls[0][0]-start[0])*(end[1]-start[1])
+            - (controls[0][1]-start[1])*(end[0]-start[0])) < 1e-8):
         return f' -- {endpoint}'
+    cubics = curve_cubics(start, end, controls)
     return ''.join(f' .. controls {coordinate(c1)} and {coordinate(c2)} .. '
                    f'{endpoint if index == len(cubics)-1 else coordinate(finish)}'
-                   for index, (c1, c2, finish) in enumerate(cubics))
+                   for index, (_, c1, c2, finish) in enumerate(cubics))
 
 
 def _circle_through(a, b, c):
@@ -313,13 +281,6 @@ def _rgb(color_index):
     return ','.join(str(channel) for channel in colormap_1(color_index))
 
 
-def _vertex_text_color(style):
-    if style['text'] != 'auto':
-        return style['text']
-    fill = 'none' if style['shape'].startswith('hollow_') else style['fill']
-    return contrast_text_color(fill)
-
-
 def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
     """Return compact, editable TikZ source that fits a page-sized area."""
     nodes = list(graph.nodes)
@@ -372,7 +333,7 @@ def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
     base_edges = {index: effective_style(graph, 'edge', {'style': index})
                   for index in edge_colors}
     show_labels = labels_visible(graph)
-    has_vertex_labels = show_labels and any(
+    has_vertex_labels = any(
         str(graph.nodes[node].get('label', node)) for node in nodes)
     has_edge_labels = show_labels and any(
         str(attributes.get('label', '')) for _, _, _, attributes in edges)
@@ -441,12 +402,15 @@ def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
                         'diamond': 'diamond',
                         'triangle': 'regular polygon, regular polygon sides=3',
                         'none': 'draw=none, fill=none'}.get(shape, 'circle')
-        options = (f'{shape_option}, draw={color_name(style["outline"]) if shape != "none" else "none"}, '
+        options = (('vertex_label, ' if has_vertex_labels else '') +
+                   f'{shape_option}, draw={color_name(style["outline"]) if shape != "none" else "none"}, '
                    f'fill={color_name(fill) if shape != "none" else "none"}, '
                    f'text={color_name(_vertex_text_color(style))}, '
                    f'line width={_number(float(style["outline_width"])*length_scale)}pt, '
                    f'minimum size={_number(float(style["size"])*length_scale)}pt, '
                    'inner sep=0pt')
+        if has_vertex_labels and not style['show_label']:
+            options += ', vertex labels=false'
         if style['tikz_options'].strip():
             options += ', ' + style['tikz_options'].strip()
         return options
@@ -469,43 +433,38 @@ def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
             options += ', ' + style['tikz_options'].strip()
         return options
 
-    for index, style in base_vertices.items():
-        lines.append(f'\\tikzset{{vertex_{index}/.style={{{vertex_options(style)}}}}}')
-    for index, style in base_edges.items():
-        lines.append(f'\\tikzset{{edge_{index}/.style={{{edge_options(style)}}}}}')
     label_font = ('' if page_scale == 1 else
                   f'font=\\fontsize{{{_number(10*page_scale)}pt}}'
                   f'{{{_number(12*page_scale)}pt}}\\selectfont, ')
     if has_vertex_labels:
-        lines.append(f'\\tikzset{{vertex_label/.style={{{label_font}inner sep=0pt, anchor=center, draw=none, fill=none}}}}')
+        lines.extend([
+            r'\tikzset{vertex labels/.is choice,',
+            r'  vertex labels/true/.style={text opacity=1},',
+            r'  vertex labels/false/.style={text opacity=0}}',
+            '% Set vertex labels=false in this shared style to hide all vertex labels.',
+            f'\\tikzset{{vertex_label/.style={{{label_font}vertex labels={str(show_labels).lower()}}}}}',
+        ])
     if has_edge_labels:
         lines.append(f'\\tikzset{{edge_label/.style={{{label_font}fill=white, inner sep={_number(page_scale)}pt}}}}')
     if has_region_labels:
         lines.append(f'\\tikzset{{region_label/.style={{{label_font}draw=none, fill=none, text=black}}}}')
+    for index, style in base_vertices.items():
+        lines.append(f'\\tikzset{{vertex_{index}/.style={{{vertex_options(style)}}}}}')
+    for index, style in base_edges.items():
+        lines.append(f'\\tikzset{{edge_{index}/.style={{{edge_options(style)}}}}}')
     lines.extend(('', r'\begin{tikzpicture}', r'  \begin{pgfonlayer}{nodelayer}'))
 
-    vertex_label_lines = []
     for node in nodes:
         style = f"vertex_{_color_index(graph.nodes[node])}"
         appearance = vertex_appearances[node]
         label_value = graph.nodes[node].get('label', node)
-        label = str(label_value) if show_labels else ''
+        label = str(label_value)
         options = f'style={style}'
         if appearance != base_vertices[_color_index(graph.nodes[node])]:
             options += ', ' + vertex_options(appearance)
-        # Keep the body at the chosen diameter. A separate label node remains
-        # part of TikZ's picture bounds, so long labels are not cropped.
         lines.append(
-            f'    \\node[{options}] ({node_ids[node]}) at {coordinate(positions[node])} {{}};'
+            f'    \\node[{options}] ({node_ids[node]}) at {coordinate(positions[node])} {{{label}}};'
         )
-        if label:
-            label_options = f'vertex_label, text={color_name(_vertex_text_color(appearance))}'
-            if appearance['tikz_options'].strip():
-                label_options += ', ' + appearance['tikz_options'].strip()
-            label_options += ', draw=none, fill=none'
-            vertex_label_lines.append(
-                f'  \\node[{label_options}] at ({node_ids[node]}.center) '
-                f'{{{label}}};')
     lines.extend([
         r'  \end{pgfonlayer}',
         r'  \begin{pgfonlayer}{background}',
@@ -600,10 +559,23 @@ def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
         controls = _edge_curve_points(graph, source, target, key)
         if controls or source == target:
             samples = edge_samples(graph, source, target, key)
-            actual_controls = controls or _loop_controls(graph, source)
-            path = _curve_commands(positions[source], positions[target], actual_controls,
-                                   coordinate, f'({node_ids[target]})')
-            lines.append(f'    \\draw[{options}] ({node_ids[source]}){path};')
+            cubics = visible_edge_cubics(graph, source, target, key)
+            if cubics:
+                def clipped_anchor(node, point):
+                    # Explicit center-relative endpoints prevent TikZ from
+                    # changing an endpoint while leaving its controls inside
+                    # a large node. No extra TikZ library is required.
+                    dx = (point[0]-positions[node][0])*coordinate_scale
+                    dy = (positions[node][1]-point[1])*coordinate_scale
+                    return (f'([xshift={_number(dx)}cm,yshift={_number(dy)}cm]'
+                            f'{node_ids[node]}.center)')
+
+                path = clipped_anchor(source, cubics[0][0])
+                for index, (_, c1, c2, finish) in enumerate(cubics):
+                    endpoint = (clipped_anchor(target, finish) if index == len(cubics)-1
+                                else coordinate(finish))
+                    path += f' .. controls {coordinate(c1)} and {coordinate(c2)} .. {endpoint}'
+                lines.append(f'    \\draw[{options}] {path};')
             index = round((len(samples)-1) * float(appearance['label_t']))
             label_position = samples[index]
             tangent_before = samples[max(0, index-1)]
@@ -633,7 +605,6 @@ def graph_to_tikz(graph, max_width_cm=14.0, max_height_cm=9.0):
 
     lines.extend([
         r'  \end{pgfonlayer}',
-        *vertex_label_lines,
         r'\end{tikzpicture}',
         '',
     ])

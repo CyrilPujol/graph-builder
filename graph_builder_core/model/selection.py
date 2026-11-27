@@ -47,6 +47,62 @@ class SelectionState:
         self.regions.intersection_update(region['id'] for region in regions(graph))
 
 
+@dataclass
+class SelectionSnapshot:
+    """Public snapshot for ``selection='any'``.
+
+    ``nodes`` contains vertex IDs, ``edges`` contains NetworkX edge tuples,
+    and ``regions`` contains region IDs. Its sets are independent of the UI.
+    """
+
+    nodes: set = field(default_factory=set)
+    edges: set = field(default_factory=set)
+    regions: set = field(default_factory=set)
+
+
+def selection_matches(selection, kind, *, nonempty=False):
+    """Check a button input without changing the current selection."""
+    if kind == 'vertex':
+        return selection.single_node() is not None
+    if kind == 'edge':
+        return len(selection.edges) == 1 and not selection.nodes
+    if not nonempty:
+        return True
+    if kind == 'vertices':
+        return bool(selected_vertices(selection))
+    if kind == 'edges':
+        return bool(selection.edges)
+    return bool(selection.nodes or selection.edges or selection.regions)
+
+
+def capture_selection(selection, kind):
+    """Capture only the objects requested by one button input."""
+    if kind in ('vertex', 'vertices'):
+        return SelectionState(nodes=(set(selection.nodes) if kind == 'vertex'
+                                     else selected_vertices(selection)))
+    if kind in ('edge', 'edges'):
+        return SelectionState(edges=set(selection.edges))
+    return copy.deepcopy(selection)
+
+
+def selection_argument(selection, kind, multigraph):
+    """Convert a captured selection to a normal callback argument."""
+    def edge_tuple(edge):
+        return ((edge.source, edge.target, edge.key) if multigraph
+                else (edge.source, edge.target))
+
+    if kind == 'vertex':
+        return next(iter(selection.nodes))
+    if kind == 'vertices':
+        return set(selection.nodes)
+    if kind == 'edge':
+        return edge_tuple(next(iter(selection.edges)))
+    edges = {edge_tuple(edge) for edge in selection.edges}
+    if kind == 'edges':
+        return edges
+    return SelectionSnapshot(set(selection.nodes), edges, set(selection.regions))
+
+
 def selected_vertices(selection):
     """Include the endpoints of selected edges in a vertex selection."""
     vertices = set(selection.nodes)

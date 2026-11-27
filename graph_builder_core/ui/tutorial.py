@@ -3,12 +3,48 @@ from __future__ import annotations
 
 from math import cos, pi, sin
 
-from PySide6.QtCore import QTimer, Signal
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QVBoxLayout
 
 from graph_builder_core.geometry.curves import _set_edge_curve_points
 from graph_builder_core.model.document import empty_graph
 from graph_builder_core.model.operations import flip_edge
+
+
+class WelcomeDialog(QDialog):
+    """Offer the first-launch tutorial without changing the drawing."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Welcome to Graph Builder')
+        self.setWindowModality(Qt.WindowModal)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 26, 28, 24)
+        layout.setSpacing(16)
+
+        title = QLabel('Welcome to Graph Builder')
+        font = title.font()
+        font.setPointSizeF(font.pointSizeF() * 1.4)
+        font.setBold(True)
+        title.setFont(font)
+        for label in (title,
+                      QLabel('A tool to draw, manipulate and study graphs'),
+                      QLabel('Would you like to have a tutorial?')):
+            label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(label)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(12)
+        buttons.addStretch()
+        self.skip_button = QPushButton('Skip')
+        self.start_button = QPushButton('Start')
+        self.start_button.setDefault(True)
+        self.skip_button.clicked.connect(self.reject)
+        self.start_button.clicked.connect(self.accept)
+        buttons.addWidget(self.skip_button)
+        buttons.addWidget(self.start_button)
+        buttons.addStretch()
+        layout.addLayout(buttons)
 
 
 TUTORIAL_STEPS = (

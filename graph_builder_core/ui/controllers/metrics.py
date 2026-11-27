@@ -97,6 +97,7 @@ class MetricsController:
             self.info_stack.setCurrentWidget(self.info_text)
         self.help_dock.hide()
         self.picture_dock.hide()
+        self.tikz_dock.hide()
         self.info_dock.show()
         self._info_has_result = True
         self._info_outdated = False
@@ -183,6 +184,7 @@ class MetricsController:
         self.info_stack.setCurrentWidget(self.info_text)
         self.help_dock.hide()
         self.picture_dock.hide()
+        self.tikz_dock.hide()
         self.info_dock.show()
         process = prepare_worker(self, topology_payload(graph))
         process._bound_problem = None
@@ -215,6 +217,7 @@ class MetricsController:
         self.info_stack.setCurrentWidget(self.custom_parameter_scroll)
         self.help_dock.hide()
         self.picture_dock.hide()
+        self.tikz_dock.hide()
         self.info_dock.show()
         self._info_has_result = True
         self._info_outdated = False

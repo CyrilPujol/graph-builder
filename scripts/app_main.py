@@ -19,6 +19,8 @@ if __name__ == '__main__':
         from graph_builder_core.algorithms.metrics import worker_from_files
         worker_from_files(sys.argv[2], sys.argv[3], sys.argv[4])
     else:
+        from graph_builder_core.io.desktop import register_desktop_documents
+        register_desktop_documents()
         from graph_builder import main
         graph_file = graph_file_argument(sys.argv[1:])
         raise SystemExit(main(actions=[], graph_file=graph_file,

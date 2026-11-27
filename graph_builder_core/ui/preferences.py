@@ -51,8 +51,8 @@ class PreferencesDialog(QDialog):
         form = QFormLayout()
         self.theme = QComboBox()
         self.theme.addItems(('System', 'Light', 'Dark'))
-        saved_theme = str(settings().value('appearance/theme', 'System'))
-        self.theme.setCurrentText(saved_theme if saved_theme in ('System', 'Light', 'Dark') else 'System')
+        saved_theme = str(settings().value('appearance/theme', 'Light'))
+        self.theme.setCurrentText(saved_theme if saved_theme in ('System', 'Light', 'Dark') else 'Light')
         form.addRow('Theme', self.theme)
         outer.addLayout(form)
         outer.addWidget(QLabel('Keyboard shortcuts'))
@@ -69,7 +69,10 @@ class PreferencesDialog(QDialog):
         self.editor = QKeySequenceEdit()
         self.editor.setMaximumSequenceLength(1)
         self.editor.setEnabled(False)
-        self.editor.installEventFilter(self)
+        # QKeySequenceEdit delegates clicks and keyboard focus to its line edit.
+        self._shortcut_focus_widgets = (self.editor, *self.editor.findChildren(QLineEdit))
+        for widget in self._shortcut_focus_widgets:
+            widget.installEventFilter(self)
         edit_row = QHBoxLayout()
         edit_row.addWidget(QLabel('Selected action'))
         edit_row.addWidget(self.editor, 1)
@@ -223,10 +226,12 @@ class PreferencesDialog(QDialog):
         warning.open()
 
     def eventFilter(self, watched, event):
-        if watched is self.editor:
+        if watched in self._shortcut_focus_widgets:
             if event.type() == QEvent.FocusIn:
                 self.editor.setStyleSheet('QKeySequenceEdit { border: 2px solid #15857f; '
-                                          'background: #d4e7e8; border-radius: 4px; padding: 3px; }')
+                                          'background: #d4e7e8; border-radius: 4px; padding: 3px; } '
+                                          'QKeySequenceEdit QLineEdit { background: #d4e7e8; '
+                                          'color: #111111; }')
             elif event.type() == QEvent.FocusOut:
                 self.editor.setStyleSheet('')
         return super().eventFilter(watched, event)
@@ -355,5 +360,5 @@ def theme_manager(app):
     if manager is None:
         manager = ThemeManager(app)
         app._graph_builder_theme_manager = manager
-        manager.apply(str(settings().value('appearance/theme', 'System')))
+        manager.apply(str(settings().value('appearance/theme', 'Light')))
     return manager

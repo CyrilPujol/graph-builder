@@ -15,7 +15,7 @@ showcase.text(lambda graph: f'{len(graph)} vertices')
 showcase.separator()
 
 
-@showcase.button('Intersection', selections=2, context=True)
+@showcase.button('Intersection', selection=['vertices', 'vertices'], context=True)
 def intersection(graph, first, second, editor):
     """Select the vertices common to two successive selections."""
     editor.select(first & second)

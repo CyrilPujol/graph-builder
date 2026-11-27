@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -28,9 +29,16 @@ def main():
     environment = os.environ.copy()
     environment.pop('PYTHONPATH', None)
     environment['QT_QPA_PLATFORM'] = 'offscreen'
+    # The extracted test copy is temporary and must not replace a real app's paths.
+    environment['GRAPH_BUILDER_SKIP_DESKTOP_REGISTRATION'] = '1'
     with tempfile.TemporaryDirectory(prefix='graph-builder-smoke-') as directory:
         extracted = Path(directory) / 'extracted'
         extracted.mkdir()
+        if system == 'Linux':
+            environment.pop('GRAPH_BUILDER_SKIP_DESKTOP_REGISTRATION', None)
+            environment['XDG_DATA_HOME'] = str(Path(directory) / 'desktop-data')
+            environment['XDG_CONFIG_HOME'] = str(Path(directory) / 'desktop-config')
+            environment['XDG_CACHE_HOME'] = str(Path(directory) / 'desktop-cache')
         if system == 'macOS':
             subprocess.run(['ditto', '-x', '-k', str(archive), str(extracted)], check=True)
             executable = extracted / 'Graph Builder.app/Contents/MacOS/Graph Builder'
@@ -44,6 +52,8 @@ def main():
             executable = extracted / 'Graph Builder/Graph Builder'
         if not executable.is_file():
             raise RuntimeError(f'No executable in archive at {executable}')
+        if system == 'Windows' and not (executable.parent / 'graphml_document.ico').is_file():
+            raise RuntimeError('Windows download is missing its GraphML document icon.')
         if system == 'macOS':
             plist_path = extracted / 'Graph Builder.app/Contents/Info.plist'
             with plist_path.open('rb') as source:
@@ -67,8 +77,6 @@ def main():
                 raise RuntimeError('macOS bundle is missing its GraphML icon.')
         if system == 'Linux':
             folder = extracted / 'Graph Builder'
-            if not (folder / 'Install desktop integration.sh').is_file():
-                raise RuntimeError('Linux download is missing desktop integration.')
             if not (folder / 'graph_builder.png').is_file():
                 raise RuntimeError('Linux download is missing its desktop icon.')
             if not (folder / 'graphml_document.png').is_file():
@@ -82,6 +90,21 @@ def main():
                 _, errors = process.communicate(timeout=5)
                 raise RuntimeError(f'Packaged app exited early ({process.returncode}):\n{errors}')
             print('Packaged app started and remained open outside the source tree.')
+            if system == 'Linux':
+                data = Path(environment['XDG_DATA_HOME'])
+                for relative in ('applications/org.cyrilpujol.GraphBuilder.desktop',
+                                 'mime/packages/org.cyrilpujol.GraphBuilder.xml',
+                                 'icons/hicolor/256x256/apps/org.cyrilpujol.GraphBuilder.png',
+                                 'icons/hicolor/256x256/mimetypes/application-graphml+xml.png'):
+                    if not (data / relative).is_file():
+                        raise RuntimeError(f'Linux app did not register {relative}')
+                if shutil.which('update-mime-database') and not (data / 'mime/mime.cache').is_file():
+                    raise RuntimeError('Linux app did not refresh its MIME database.')
+                validator = shutil.which('desktop-file-validate')
+                if validator:
+                    subprocess.run([validator, str(data / 'applications/org.cyrilpujol.GraphBuilder.desktop')],
+                                   check=True, timeout=5)
+                print('Packaged Linux app registered desktop metadata in an isolated user folder.')
         finally:
             if process.poll() is None:
                 process.terminate()

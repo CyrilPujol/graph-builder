@@ -15,7 +15,7 @@ def build_extension_menu(window, menu, toolbar):
         if item.kind == 'button':
             action = by_action[id(item.action)]
             toolbar.addAction(action)
-            if item.action.selections > 1:
+            if len(item.action.selection_types) > 1:
                 style_staged_button(toolbar.widgetForAction(action))
         elif item.kind == 'separator':
             toolbar.addSeparator()
@@ -90,7 +90,7 @@ def build_extension_menu(window, menu, toolbar):
             control = menu_button(item.label, drop_down, toolbar)
             control.setCheckable(True)
             staged_labels = [action.display_name(window.context()) + ' ✓'
-                             for action in item.options if action.selections > 1]
+                             for action in item.options if len(action.selection_types) > 1]
             if staged_labels:
                 style_staged_button(control, staged_labels, dropdown=True)
             control.clicked.connect(lambda checked=False: (

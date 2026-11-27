@@ -79,6 +79,7 @@ class GraphScene(QGraphicsScene):
         self.region_hover_target = None
         self.region_boundary_drag = None
         self.lasso_points = []
+        self.touch_trail_points = ()
         self.rubber_rect = None
 
     def _relax_held_vertex(self):
@@ -273,6 +274,15 @@ class GraphScene(QGraphicsScene):
             painter.setPen(QPen(SELECTION_COLOR, 1.5, Qt.DashLine))
             painter.setBrush(QColor(21, 133, 127, 25))
             painter.drawRect(self.rubber_rect)
+        if len(self.touch_trail_points) > 1:
+            painter.setBrush(Qt.NoBrush)
+            pen = QPen(SELECTION_COLOR, 2, Qt.DashLine, Qt.RoundCap, Qt.RoundJoin)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            path = QPainterPath(self.touch_trail_points[0])
+            for point in self.touch_trail_points[1:]:
+                path.lineTo(point)
+            painter.drawPath(path)
 
     def cancel_edge_creation(self):
         self.set_edge_hover_target(None)

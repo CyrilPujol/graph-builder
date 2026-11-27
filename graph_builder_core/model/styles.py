@@ -10,7 +10,7 @@ from graph_builder_core.model.palette import colormap_1
 
 
 FIELDS = {
-    'vertex': ('fill', 'outline', 'shape', 'size', 'outline_width', 'text',
+    'vertex': ('fill', 'outline', 'shape', 'size', 'outline_width', 'text', 'show_label',
                'tikz_options'),
     'edge': ('stroke', 'width', 'pattern', 'opacity', 'label_t',
              'label_offset', 'arrow_shape', 'arrow_length', 'arrow_width',
@@ -44,10 +44,10 @@ def base_style(kind, color_index):
     if kind == 'vertex':
         if int(color_index) == 0:
             return dict(fill='#ffffff', outline='#000000', shape='circle', size=34.0,
-                        outline_width=2.0, text='auto',
+                        outline_width=2.0, text='auto', show_label=True,
                         tikz_options='')
         return dict(fill=color, outline='#222222', shape='circle', size=34.0,
-                    outline_width=1.5, text='auto',
+                    outline_width=1.5, text='auto', show_label=True,
                     tikz_options='')
     return dict(stroke=color, width=2.6, pattern='solid', opacity=1.0,
                 label_t=.5, label_offset=0.0, arrow_shape='triangle',
@@ -92,6 +92,16 @@ def contrast_text_color(fill):
     return '#ffffff'
 
 
+def vertex_text_color(style):
+    """Resolve automatic text against the visible body, not an unused fill."""
+    if style['text'] != 'auto':
+        return style['text']
+    if style['shape'] == 'none':
+        return '#000000'
+    fill = 'none' if style['shape'].startswith('hollow_') else style['fill']
+    return contrast_text_color(fill)
+
+
 def palette_styles(graph, kind):
     return _read(graph.graph.get(f'{kind}_styles'))
 
@@ -117,6 +127,12 @@ def has_custom_look(attributes):
     preset = attributes.get('style_preset')
     return bool(_read(attributes.get('style_overrides'))) or bool(
         preset and preset != DEFAULT_PRESET_ID)
+
+
+def vertex_label_visible(graph, attributes):
+    """Combine the document's Labels toggle with a vertex's effective style."""
+    from graph_builder_core.model.document import labels_visible
+    return bool(labels_visible(graph) and effective_style(graph, 'vertex', attributes)['show_label'])
 
 
 def set_overrides(attributes, changes):

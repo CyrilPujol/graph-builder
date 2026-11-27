@@ -15,12 +15,12 @@ Download the archive for your computer from [Releases](https://github.com/CyrilP
 To open a `.graphml` file by double-clicking it, choose Graph Builder as its default app once:
 
 - **macOS:** move `Graph Builder.app` to Applications, then use a GraphML file's **Get Info → Open with → Graph Builder → Change All**. The app also accepts **Open With** and files dropped on its Dock icon, including while it is already running.
-- **Windows:** right-click `Install desktop integration.ps1` in the extracted app folder and choose **Run with PowerShell** to register the document icon. Then right-click a GraphML file and choose **Open with → Choose another app → Graph Builder → Always**. Alternatively, browse directly to `Graph Builder.exe`. Keep its whole folder in place afterward.
-- **Linux:** from the extracted folder, run `sh "Graph Builder/Install desktop integration.sh"`. This copies the app into your user account, adds it to the applications list, and makes it the GraphML opener without administrator access.
+- **Windows:** right-click a GraphML file and choose **Open with → Choose another app**, browse to `Graph Builder.exe`, and choose **Always**. The app registers its GraphML document icon automatically when it starts, without administrator access or changing your default app. Keep its whole folder together. If you move it later, launch it once from the new location.
+- **Linux:** launch the extracted app once to add Graph Builder to your applications list and register its GraphML icon. Then choose Graph Builder using your file manager's **Open with** option. Registration needs no administrator access and does not change your default opener. Keep the app folder together. If you move it, launch it once from the new location.
 
 GraphML is also used by other programs, so Graph Builder never silently takes over the file type when you merely extract the download.
 
-The app supplies a static GraphML document-type icon through macOS bundle registration or the optional Windows/Linux desktop integration. Your file manager may retain a generic icon even when opening works correctly. Saving never attaches custom icons or extra metadata to individual files. These icons are not previews of each graph.
+The app supplies a static GraphML document-type icon through macOS bundle registration or automatic per-user registration on Windows and Linux. Your file manager may retain a cached icon briefly even when opening works correctly. Saving never attaches custom icons or extra metadata to individual files. These icons are not previews of each graph.
 
 **File → Open** also imports graph6, sparse6, and digraph6 files (`.g6`, `.s6`, `.d6` and their long extensions), including loops and parallel edges where supported by the format. For files containing several graphs, choose the graph to open. Imported graphs receive an initial drawing and save as new GraphML documents, preserving the source file.
 

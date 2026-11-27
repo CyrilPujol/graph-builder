@@ -60,7 +60,7 @@ logic.submenu('More actions', [run_search, mark_endpoints])
 ## Successive selections and editor access
 
 ```python
-@logic.button('Connect sets', selections=2)
+@logic.button('Connect sets', selection=['vertices', 'vertices'])
 def connect_sets(graph, first, second):
     graph.add_edges_from((u, v) for u in first for v in second if u != v)
 ```
@@ -68,8 +68,14 @@ def connect_sets(graph, first, second):
 The first click captures and highlights the selected vertices. Select the next
 set and click again, or press Enter. Esc cancels. Sets may overlap. The function
 runs only after all selections are captured, as one undoable graph change.
-Use `selections=3` for three sets. This also works with plain `@button` in Custom
-and inside a submenu. A pending submenu can be clicked directly to continue.
+Use `selection=['vertex', 'edges', 'vertex']` to collect mixed inputs, passed
+as `graph, start, edges, end`. Each entry can be `'vertex'`, `'vertices'`,
+`'edge'`, `'edges'`, or `'any'`. Edges are NetworkX tuples, including keys for
+multigraphs. `'any'` passes a snapshot with `nodes`, `edges`, and `regions` sets.
+The iterable is consumed once. Each stage must be nonempty, and captured vertices
+and edges stay marked in amber. This works with plain `@button` and inside a
+submenu too.
+A pending submenu can be clicked directly to continue.
 
 For view and selection operations, add `context=True`. The last callback argument
 is an editor context with `selected_vertices`, `select(vertices)`, `view_center`,

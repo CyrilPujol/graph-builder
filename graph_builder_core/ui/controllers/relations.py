@@ -18,7 +18,7 @@ class RelationsController:
         previous = self._full_join_first
         self._full_join_first = frozenset()
         if previous:
-            self.statusBar().clearMessage()
+            self.clear_report()
         self.full_join_action.setChecked(False)
         self._set_action_tooltip(self.full_join_action)
         for node in previous:
@@ -35,7 +35,7 @@ class RelationsController:
         self.product_button.setPopupMode(QToolButton.InstantPopup)
         self.product_button.setToolTip('Choose a product of two selected vertex sets.')
         if previous:
-            self.statusBar().clearMessage()
+            self.clear_report()
         for node in previous:
             item = self.node_items.get(node)
             if item is not None and item.scene() is self.scene:
@@ -150,7 +150,7 @@ class RelationsController:
         previous = self._morphism_first
         self._morphism_first = frozenset()
         if previous:
-            self.statusBar().clearMessage()
+            self.clear_report()
         self.morphism_action.setChecked(False)
         self._set_action_tooltip(self.morphism_action)
         for node in previous:
@@ -169,7 +169,7 @@ class RelationsController:
         previous = self._minor_first
         self._minor_first = frozenset()
         if previous:
-            self.statusBar().clearMessage()
+            self.clear_report()
         self.minor_action.setChecked(False)
         self._set_action_tooltip(self.minor_action)
         for node in previous:
@@ -189,7 +189,7 @@ class RelationsController:
         self._subgraph_first = frozenset()
         self._subgraph_kind = None
         if previous:
-            self.statusBar().clearMessage()
+            self.clear_report()
         self.subgraph_action.setChecked(False)
         self.induced_subgraph_action.setChecked(False)
         for node in previous:

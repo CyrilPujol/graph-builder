@@ -12,7 +12,7 @@ from graph_builder_core.algorithms.metrics import topology_payload
 from graph_builder_core.extensions import public_graph
 from graph_builder_core.io.graphml import convert_from_file, write_graph_file
 from graph_builder_core.io.picture import convert_picture_pdf, render_picture_pdf
-from graph_builder_core.io.tikz import write_tikz
+from graph_builder_core.io.tikz import graph_to_tikz
 from graph_builder_core.model.document import _deserialize_graph, _serialize_graph, empty_graph
 
 
@@ -183,6 +183,21 @@ class DocumentController:
         return False
 
     def export_tikz(self):
+        try:
+            source = graph_to_tikz(self.graph)
+        except Exception as error:
+            QMessageBox.critical(self, 'Could not export TikZ', str(error))
+            return
+        self.tikz_preview.set_code(source)
+        self.info_dock.hide()
+        self.help_dock.hide()
+        self.tutorial_dock.hide()
+        self.picture_dock.hide()
+        self.tikz_dock.show()
+        self.tikz_dock.raise_()
+        self.tikz_preview.code.setFocus()
+
+    def _save_tikz_preview(self):
         proposed = str((self.path or _default_file_folder() / 'graph.graphml').with_suffix('.tex'))
         filename, _ = QFileDialog.getSaveFileName(self, 'Export to TikZ', proposed,
                                                    'TikZ files (*.tex);;All files (*)')
@@ -191,7 +206,7 @@ class DocumentController:
             if not path.suffix:
                 path = path.with_suffix('.tex')
             try:
-                write_tikz(self.graph, path)
+                path.write_text(self.tikz_preview.source(), encoding='utf-8')
             except Exception as error:
                 QMessageBox.critical(self, 'Could not export TikZ', str(error))
                 return
@@ -213,6 +228,7 @@ class DocumentController:
         self.info_dock.hide()
         self.help_dock.hide()
         self.tutorial_dock.hide()
+        self.tikz_dock.hide()
         self.picture_dock.show()
         self.picture_dock.raise_()
         self.report('Picture ready to preview and save', 3)

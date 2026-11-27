@@ -15,14 +15,14 @@ from pathlib import Path
 import sys
 import time
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSettings, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSettings, Qt, QTimer, QSignalBlocker
 from PySide6.QtGui import (
     QAction, QActionGroup, QColor, QCursor, QFileOpenEvent, QKeySequence, QShortcut,
     QTransform,
 )
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QApplication, QComboBox, QFrame, QDialog, QGraphicsDropShadowEffect,
-    QLabel, QMainWindow, QMessageBox, QTextEdit, QLineEdit, QToolButton, QToolTip, QWidget,
+    QLabel, QMainWindow, QMessageBox, QPlainTextEdit, QTextEdit, QLineEdit, QToolButton, QToolTip, QWidget,
 )
 
 from graph_builder_core.actions import (
@@ -54,6 +54,7 @@ from graph_builder_core.model.regions import (
 )
 from graph_builder_core.model.selection import (
     EdgeRef, SelectionState, copy_graph_selection, selected_vertices, paste_graph_selection,
+    capture_selection, selection_matches,
 )
 from graph_builder_core.model.styles import has_custom_look, use_basic_style
 from graph_builder_core.ui.action_search import ActionSearchDialog, SearchableControl
@@ -72,7 +73,7 @@ from graph_builder_core.ui.preferences import (
     PreferencesDialog, settings as preference_settings, theme_manager,
 )
 from graph_builder_core.ui.scene import GraphScene
-from graph_builder_core.ui.tutorial import tutorial_graph
+from graph_builder_core.ui.tutorial import WelcomeDialog, tutorial_graph
 from graph_builder_core.ui.view import GraphView
 
 
@@ -98,8 +99,12 @@ class GraphBuilderApplication(QApplication):
             url = event.url()
             filename = url.toLocalFile() if url.isLocalFile() else event.file()
             if filename:
-                self._pending_files.append(Path(filename))
-                QTimer.singleShot(0, self._open_pending_files)
+                from graph_builder_core.io.compact_graphs import COMPACT_SUFFIXES
+                path = Path(filename)
+                # macOS also sends debugger/startup paths, not just documents.
+                if path.is_file() and path.suffix.lower() in {'.graphml', *COMPACT_SUFFIXES}:
+                    self._pending_files.append(path)
+                    QTimer.singleShot(0, self._open_pending_files)
             event.accept()
             return True
         return super().event(event)
@@ -231,11 +236,6 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
         self._apply_theme()
         self.rebuild_scene()
         self.view.centerOn(self.grid_origin)
-        self._basic_moves_completed = set()
-        self.onboarding_hint = QLabel(
-            'Click to create/select/move · Secondary-drag for edges and lasso selection · Alt-drag to pan.', self)
-        self.statusBar().addWidget(self.onboarding_hint, 1)
-        self.statusBar().messageChanged.connect(self._sync_status_bar_visibility)
         self.update_actions()
         self._keyboard_filter_active = False
 
@@ -292,16 +292,17 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
                         event.ignore()
                     return True
         if (event.type() == QEvent.ShortcutOverride and self.isActiveWindow()
-                and event.matches(QKeySequence.Copy)):
+                and (event.matches(QKeySequence.Copy) or event.matches(QKeySequence.SelectAll))):
             focus = QApplication.focusWidget()
-            if focus is not None and self.info_dock.isAncestorOf(focus):
+            if focus is not None and (self.info_dock.isAncestorOf(focus) or
+                                      self.tikz_dock.isAncestorOf(focus)):
                 event.accept()
                 return True
         if (event.type() == QEvent.KeyPress and self.isActiveWindow()
                 and QApplication.activeModalWidget() is None
                 and QApplication.activePopupWidget() is None):
             focus = QApplication.focusWidget()
-            typing = isinstance(focus, (QLineEdit, QAbstractSpinBox, QComboBox, QTextEdit))
+            typing = isinstance(focus, (QLineEdit, QAbstractSpinBox, QComboBox, QTextEdit, QPlainTextEdit))
             key = event.key()
             modifiers = event.modifiers()
             if not typing and key == Qt.Key_Escape and self.region_path is not None:
@@ -339,15 +340,8 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
                     else self.subgraph_action)
         return None
 
-    def _sync_status_bar_visibility(self, message=''):
-        self.statusBar().setVisible(self.onboarding_hint.isVisible() or bool(message))
-
     def mark_basic_move(self, move):
-        self._basic_moves_completed.add(move)
         self._observe_tutorial(move)
-        if {'create_vertex', 'create_edge', 'move_vertex'} <= self._basic_moves_completed:
-            self.onboarding_hint.hide()
-            self._sync_status_bar_visibility(self.statusBar().currentMessage())
 
     def _observe_tutorial(self, move):
         if self.tutorial_active:
@@ -365,18 +359,25 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
                              tuple(pointer.toTuple()))
 
     def report(self, message, duration=5):
-        self.statusBar().showMessage(str(message).replace('\n', '  ·  '), int(duration * 1000))
         self.information_label.setText(str(message).replace('\n', '<br>'))
         self.information_label.adjustSize()
         self.view.position_message()
         self.information_label.show()
-        self._message_timer.start(int(duration * 1000))
+        if duration is None:
+            self._message_timer.stop()
+        else:
+            self._message_timer.start(int(duration * 1000))
+
+    def clear_report(self):
+        self._message_timer.stop()
+        self.information_label.hide()
 
     def _action(self, label, callback, shortcut=None, checkable=False):
         action = QAction(label, self)
         action.setCheckable(checkable)
         if shortcut:
             action.setShortcut(QKeySequence(shortcut))
+        action.triggered.connect(lambda checked=False: self.view.cancel_selection_tool())
         action.triggered.connect(callback)
         self._set_action_tooltip(action)
         return action
@@ -442,8 +443,11 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
         self.paste_action = self._action('Paste', self.paste_selection, QKeySequence.Paste)
         self.select_all_action = self._action('Select all', self.select_all_vertices,
                                               QKeySequence.SelectAll)
-        self.select_colors_action = self._action('Select colors', self.select_colors)
-        self.select_neighbours_action = self._action('Select neighbours', self.select_neighbours, 'N')
+        self.select_colors_action = self._action('Select style', self.select_colors)
+        self.select_neighbours_action = self._action('Select neighbour', self.select_neighbours, 'N')
+        self.select_complement_action = self._action('Select complement', self.select_complement)
+        self.lasso_selection_action = self._action('Lasso selection', lambda: self.view.arm_selection_tool('lasso'))
+        self.touch_selection_action = self._action('Touch selection', lambda: self.view.arm_selection_tool('touch'))
         self.delete_action = self._action('Delete', self.delete_selection)
         # On a Mac keyboard the key labelled "delete" sends Backspace.  Keep
         # forward Delete as an alternative for full-size and non-Mac keyboards.
@@ -479,6 +483,14 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
             kind: self._action(title, lambda checked=False, kind=kind: self.start_product(kind))
             for kind, (title, _) in PRODUCTS.items()
         }
+        product_tips = {
+            'tensor': 'Tensor product of two selections: both coordinates must be adjacent.',
+            'cartesian': 'Cartesian product of two selections: change one coordinate along an edge.',
+            'lexicographic': 'Lexicographic product: replace each vertex of the first selection by the second graph.',
+        }
+        for kind, action in self.product_actions.items():
+            action.setProperty('description', product_tips[kind])
+            self._set_action_tooltip(action)
         self.morphism_action = self._action('Morphism', self.morphism_selection,
                                             checkable=True)
         self.minor_action = self._action('Minor', self.minor_selection, checkable=True)
@@ -554,9 +566,9 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
             (self.grid_down_action, 'Double the spacing between grid lines or circles.'),
             (self.grid_up_action, 'Halve the spacing between grid lines or circles.'),
             (self.labels_action, 'Show or hide vertex and edge labels.'),
-            (self.directed_action, 'Show edges as directed arrows.'),
-            (self.multiedges_action, 'Allow several edges between the same vertices. Drag to add an edge.'),
-            (self.loops_action, 'Allow loops. Drag outside a vertex and back to connect it to itself.'),
+            (self.directed_action, 'Change from graph to digraph.'),
+            (self.multiedges_action, 'Allow several edges between the same vertices.'),
+            (self.loops_action, 'Allow loops.'),
             (self.arrange_action, 'Automatically arrange vertices.'),
             (self.pin_action, 'Keep selected vertices in place when arranging.'),
             (self.unpin_action, 'Allow selected vertices to move when arranging.'),
@@ -565,11 +577,14 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
             (self.open_action, 'Open a saved graph.'),
             (self.save_action, 'Save the current drawing.'),
             (self.save_as_action, 'Save the drawing under a new name.'),
-            (self.export_action, 'Export editable TikZ code.'),
-            (self.export_picture_action, 'Render and save a picture of the drawing.'),
+            (self.export_action, 'Save the TikZ code of the drawing.'),
+            (self.export_picture_action, 'Save a picture of the drawing.'),
             (self.select_all_action, 'Select every vertex.'),
             (self.select_colors_action, 'Select every vertex with a selected style index.'),
             (self.select_neighbours_action, 'Select the open neighbourhood of the selected vertices.'),
+            (self.select_complement_action, 'Select unselected objects of the same kinds.'),
+            (self.lasso_selection_action, 'Drag around vertices to select them. Shortcut: [right-drag] or [Ctrl+drag] on empty space.'),
+            (self.touch_selection_action, 'Drag over vertices, edges, and regions to select everything the path touches.'),
             (self.delete_action, 'Delete selected objects.'),
             (self.remove_coloring_action, 'Reset vertex and edge styles to 0 and restore the default region look.'),
             (self.make_region_action, 'Fill a selected boundary or trace a new region.'),
@@ -617,14 +632,14 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
             qt_action.setProperty('description', definition.description or '')
             self._set_action_tooltip(qt_action)
             self.extension_actions.append((definition, qt_action))
-            qt_action.setCheckable(definition.selections > 1)
+            qt_action.setCheckable(len(definition.selection_types) > 1)
 
     def _configure_shortcuts(self):
         """Collect stable action IDs and restore user shortcuts across launches."""
         groups = {
             'File': ('new', 'open', 'save', 'save_as', 'export', 'export_picture', 'close'),
             'Edition': ('undo', 'redo', 'copy', 'paste', 'select_all', 'select_colors',
-                        'select_neighbours',
+                        'select_neighbours', 'select_complement', 'lasso_selection', 'touch_selection',
                         'delete', 'deselect'),
             'Structure': ('directed', 'multiedges', 'loops', 'cut', 'full_join',
                           'product_confirm'),
@@ -725,6 +740,8 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
             add(menu, actions[1], control.increase)
         for action in self.style_menu.actions():
             add('Appearances', action, self.style_button)
+        for action in self.selection_menu.actions():
+            add('Edition', action, self.selection_button)
         for action in self.product_actions.values():
             add('Structure', action, self.product_button)
         found.append(SearchableControl('Appearances', 'Styles', self.style_button))
@@ -818,7 +835,7 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
 
     def _apply_theme(self):
         manager = theme_manager(QApplication.instance())
-        manager.apply(str(preference_settings().value('appearance/theme', 'System')))
+        manager.apply(str(preference_settings().value('appearance/theme', 'Light')))
         self.theme_dark = manager.is_dark
         if hasattr(self, 'preferences_button'):
             self.preferences_button.setIcon(_gear_icon(dark=self.theme_dark))
@@ -846,12 +863,14 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
             self.info_dock.hide()
             self.tutorial_dock.hide()
             self.picture_dock.hide()
+            self.tikz_dock.hide()
             self.help_dock.show()
 
     def show_custom_help(self):
         self.info_dock.hide()
         self.tutorial_dock.hide()
         self.picture_dock.hide()
+        self.tikz_dock.hide()
         self.help_dock.show()
         self.help_text.scrollToAnchor('custom-buttons')
 
@@ -860,8 +879,38 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
         if settings.value('tutorial/offered', False, type=bool):
             return False
         settings.setValue('tutorial/offered', True)
-        self.start_tutorial()
+        self.show_welcome_popup()
         return True
+
+    def show_welcome_popup(self):
+        """Show the app's welcome offer, also available to local test actions.
+
+        This does not modify first-launch settings. Starting from a nonempty
+        drawing uses the normal replay confirmation before replacing it.
+        """
+        existing = getattr(self, '_welcome_dialog', None)
+        if existing is not None:
+            existing.raise_()
+            existing.activateWindow()
+            return existing
+        dialog = WelcomeDialog(self)
+        self._welcome_dialog = dialog
+
+        def finished(result):
+            self._welcome_dialog = None
+            dialog.deleteLater()
+            if result == QDialog.Accepted:
+                self.replay_tutorial()
+
+        dialog.finished.connect(finished)
+        dialog.show()
+        dialog.adjustSize()
+        position = self.frameGeometry().center() - dialog.rect().center()
+        available = self.screen().availableGeometry()
+        position.setX(max(available.left(), min(position.x(), available.right() - dialog.width() + 1)))
+        position.setY(max(available.top(), min(position.y(), available.bottom() - dialog.height() + 1)))
+        dialog.move(position)
+        return dialog
 
     def start_tutorial(self):
         self.vertex_color = 0
@@ -876,6 +925,7 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
         self.info_dock.hide()
         self.help_dock.hide()
         self.picture_dock.hide()
+        self.tikz_dock.hide()
         self.tutorial_dock.show()
         QTimer.singleShot(0, self.fit_graph)
 
@@ -1011,8 +1061,7 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
         self.selection = SelectionState(set(new_ids.values()), set())
         self.rebuild_scene()
         self.commit_change()
-        self.statusBar().showMessage(
-            f'Added {len(new_ids)} vertices and {generated.graph.number_of_edges()} edges', 4000)
+        self.report(f'Added {len(new_ids)} vertices and {generated.graph.number_of_edges()} edges', 4)
         return set(new_ids.values())
 
     def selection_changed(self):
@@ -1110,7 +1159,7 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
             self.selection = selection
         prune_regions(self.graph)
         self.selection.prune(self.graph)
-        if any(not group.issubset(self.graph) for group in self._staged_sets):
+        if not self._captured_selections_exist():
             self._cancel_staged_extension()
         if not self._full_join_first.issubset(self.graph):
             self._clear_full_join()
@@ -1591,19 +1640,19 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
             self._cancel_region_path()
         if self._full_join_first:
             self._clear_full_join()
-            self.statusBar().clearMessage()
+            self.clear_report()
         if self._morphism_first or self._morphism_process is not None:
             self._clear_morphism(cancel_process=True)
-            self.statusBar().clearMessage()
+            self.clear_report()
         if self._minor_first or self._minor_process is not None:
             self._clear_minor(cancel_process=True)
-            self.statusBar().clearMessage()
+            self.clear_report()
         if self._subgraph_first or self._subgraph_process is not None:
             self._clear_subgraph(cancel_process=True)
-            self.statusBar().clearMessage()
+            self.clear_report()
         if self._product_first:
             self._clear_product()
-            self.statusBar().clearMessage()
+            self.clear_report()
         self.scene.cancel_edge_creation()
         self.scene.clearSelection()
         self.selection.clear()
@@ -1614,6 +1663,24 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
         self.scene.clearSelection()
         for item in self.node_items.values():
             item.setSelected(True)
+
+    def select_complement(self):
+        """Complement only the object kinds present in the current selection."""
+        selection = self.selection
+        include_nodes = bool(selection.nodes) or not (selection.edges or selection.regions)
+        targets = []
+        if include_nodes:
+            targets += [item for node, item in self.node_items.items() if node not in selection.nodes]
+        if selection.edges:
+            targets += [item for item in self.edge_items.values()
+                        if EdgeRef(item.source, item.target, self.is_directed, item.key) not in selection.edges]
+        if selection.regions:
+            targets += [item for identifier, item in self.region_items.items() if identifier not in selection.regions]
+        with QSignalBlocker(self.scene):
+            self.scene.clearSelection()
+            for item in targets:
+                item.setSelected(True)
+        self.selection_changed()
 
     def select_colors(self):
         if not self.selection.nodes:
@@ -1774,42 +1841,58 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
             return
         self._staged_extension = None
         self._staged_sets = []
-        self.statusBar().clearMessage()
-        for item in self.node_items.values():
+        self.clear_report()
+        for item in (*self.node_items.values(), *self.edge_items.values()):
             item.update()
         self.update_actions()
+
+    def _captured_selections_exist(self):
+        for group in self._staged_sets:
+            remaining = copy.deepcopy(group)
+            remaining.prune(self.graph)
+            if remaining != group:
+                return False
+        return True
 
     def _request_next_selection(self, title, number=2, total=2, message=None):
         """Common capture feedback for built-in and extension staged actions."""
         self.scene.clearSelection()
         self.selection.clear()
-        for item in self.node_items.values():
+        for item in (*self.node_items.values(), *self.edge_items.values()):
             item.update()
-        self.statusBar().showMessage(message or (
+        self.report(message or (
             f'{title}: select set {number} of {total}, '
-            'then click again or press Enter. Esc cancels.'))
+            'then click again or press Enter. Esc cancels.'), duration=None)
         self.update_actions()
 
     def run_extension(self, definition, *, revert_key=None):
-        if definition.selections > 1:
-            vertices = set(self.selection.nodes)
-            if not vertices:
-                self.report('Select vertices, then click again or press Enter. Esc cancels.', 5)
+        kinds = definition.selection_types
+        if len(kinds) > 1:
+            stage = len(self._staged_sets) if self._staged_extension is definition else 0
+            kind = kinds[stage]
+            descriptions = {'vertex': 'one vertex', 'vertices': 'vertices',
+                            'edge': 'one edge', 'edges': 'edges', 'any': 'objects'}
+            if not selection_matches(self.selection, kind, nonempty=True):
+                self.report(f'Select {descriptions[kind]}, then click again or press Enter. Esc cancels.', 5)
                 self.update_actions()
                 return
+            captured = capture_selection(self.selection, kind)
             if self._staged_extension is not definition:
                 self.deselect()
                 self._staged_extension = definition
-            self._staged_sets = [group & set(self.graph) for group in self._staged_sets]
-            if any(not group for group in self._staged_sets):
+            if not self._captured_selections_exist():
                 self._cancel_staged_extension()
                 self.report('A captured selection was deleted. Start again.', 5)
                 self.update_actions()
                 return
-            self._staged_sets.append(vertices)
-            if len(self._staged_sets) < definition.selections:
-                self._request_next_selection(definition.display_name(self.context()),
-                                             len(self._staged_sets) + 1, definition.selections)
+            self._staged_sets.append(captured)
+            if len(self._staged_sets) < len(kinds):
+                number = len(self._staged_sets) + 1
+                title = definition.display_name(self.context())
+                message = (f'{title}: select {descriptions[kinds[number - 1]]} '
+                           f'({number} of {len(kinds)}), '
+                           'then click again or press Enter. Esc cancels.')
+                self._request_next_selection(title, number, len(kinds), message)
                 return
             self._completed_selections = tuple(self._staged_sets)
             self._cancel_staged_extension()
@@ -1855,7 +1938,9 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
             else self.selection.regions))
         self.delete_action.setEnabled(bool(selected_count or any(
             handle.isSelected() for handle in (*self.curve_handles, *self.region_curve_handles))))
-        self.deselect_action.setEnabled(bool(selected_count or self._staged_extension or self._full_join_first or
+        self.deselect_action.setEnabled(bool(selected_count or self.view.pending_selection_tool or
+                                              self.view._active_selection_tool or
+                                              self._staged_extension or self._full_join_first or
                                               self._morphism_first or self._morphism_process or
                                               self._minor_first or self._minor_process or
                                               self._subgraph_first or self._subgraph_process or
@@ -1931,7 +2016,7 @@ class GraphBuilderQt(MetricsController, AppearanceController, RegionController, 
         self.radial_control.set_limits(self.radial_down_action.isEnabled(), self.radial_up_action.isEnabled())
         context = self.context()
         for definition, qt_action in self.extension_actions:
-            if definition.selections > 1:
+            if len(definition.selection_types) > 1:
                 qt_action.setChecked(self._staged_extension is definition)
             qt_action.setEnabled(definition.is_available(context))
             qt_action.setText(definition.display_name(context))

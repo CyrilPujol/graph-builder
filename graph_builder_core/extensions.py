@@ -174,12 +174,12 @@ class ExtensionMenu:
     generators: list = field(default_factory=list)
 
     def button(self, name=None, *, shortcut=None, selection=None, when=None,
-               selections=1, context=False):
+               context=False):
         """Add an action button to this menu.
 
         Parameters
         ----------
-        name, shortcut, selection, selections, context
+        name, shortcut, selection, context
             Have the same meanings as in :func:`button`.
         when : callable, optional
             Fast ``when(graph)`` predicate controlling availability.
@@ -197,7 +197,7 @@ class ExtensionMenu:
         def decorate(function):
             decorated = button(name if isinstance(name, str) else None,
                                shortcut=shortcut, selection=selection,
-                               selections=selections, context=context)(function)
+                               context=context)(function)
             action = decorated.__graph_button__
             decorated.__graph_extension_menu__ = self
             action.group = f'menu:{self.name}'
@@ -762,7 +762,7 @@ class ButtonContext:
         self._context.interaction.report(str(text), 5)
 
 
-def button(name=None, *, shortcut=None, selection=None, selections=1, context=False):
+def button(name=None, *, shortcut=None, selection=None, context=False):
     """Register a graph-editing function as a Custom button.
 
     Parameters
@@ -771,15 +771,16 @@ def button(name=None, *, shortcut=None, selection=None, selections=1, context=Fa
         Button text, defaulting to the function's name.
     shortcut : str, optional
         Keyboard shortcut.
-    selection : {None, 'vertex', 'vertices', 'edge'}, optional
+    selection : {None, 'vertex', 'vertices', 'edge', 'edges', 'any'} or iterable, optional
         Extra input passed after the graph. A single vertex ID requires
         exactly one selected vertex. ``'vertices'`` passes a set, possibly
         empty. An edge is ``(source, target)`` or ``(source, target, key)``
-        when multiedges are enabled.
-    selections : int, optional
-        Number of successive nonempty vertex sets to collect. With two sets,
-        the callback receives ``graph, first_set, second_set``. Enter
-        confirms the next set and Esc cancels.
+        when multiedges are enabled. ``'edges'`` passes a set of edge tuples.
+        ``'any'`` passes a snapshot with ``nodes``, ``edges`` (tuples), and
+        ``regions`` sets. An iterable such as ``['vertex', 'edges', 'vertex']``
+        collects those inputs successively, in order. It is consumed once.
+        Each successive input must be nonempty. Enter confirms the next input
+        and Esc cancels.
     context : bool, optional
         Append a :class:`ButtonContext` argument for selection and view access.
 
@@ -801,13 +802,19 @@ def button(name=None, *, shortcut=None, selection=None, selections=1, context=Fa
     function ``grow(graph, vertex)`` that adds a neighbor.
     """
     from graph_builder_core.actions import Action
-    from graph_builder_core.model.selection import selected_vertices
-    if selection not in (None, 'vertex', 'vertices', 'edge'):
-        raise ValueError("selection must be None, 'vertex', 'vertices', or 'edge'.")
-    if isinstance(selections, bool) or not isinstance(selections, int) or selections < 1:
-        raise ValueError('selections must be a positive integer.')
-    if selections > 1 and selection not in (None, 'vertices'):
-        raise ValueError('Repeated selections are vertex sets.')
+    from graph_builder_core.model.selection import capture_selection, selection_argument, selection_matches
+    if selection is None or isinstance(selection, str):
+        kinds = () if selection is None else (selection,)
+    else:
+        try:
+            kinds = tuple(selection)
+        except TypeError as error:
+            raise ValueError('selection must be an input kind or an iterable of kinds.') from error
+        if not kinds:
+            raise ValueError('selection must contain at least one input kind.')
+    valid_kinds = ('vertex', 'vertices', 'edge', 'edges', 'any')
+    if any(kind not in valid_kinds for kind in kinds):
+        raise ValueError("Selection kinds must be 'vertex', 'vertices', 'edge', 'edges', or 'any'.")
     use_context = context
 
     def decorate(function):
@@ -816,26 +823,19 @@ def button(name=None, *, shortcut=None, selection=None, selections=1, context=Fa
         description = documentation.splitlines()[0] if documentation else None
 
         def available(context):
-            if selection == 'vertex':
-                return context.selection.single_node() is not None
-            if selection == 'edge':
-                return len(context.selection.edges) == 1 and not context.selection.nodes
-            return True
+            return (len(kinds) > 1 or not kinds
+                    or selection_matches(context.selection, kinds[0]))
 
         def invoke(context):
             graph = public_graph(context.graph)
             orientations = {frozenset((u, v)): (u, v) for u, v in graph.edges()} if not graph.is_directed() else None
             args = [graph]
-            if selections > 1:
-                args.extend(set(vertices) for vertices in context.interaction._completed_selections)
-            elif selection == 'vertex':
-                args.append(context.selection.single_node())
-            elif selection == 'vertices':
-                args.append(selected_vertices(context.selection))
-            elif selection == 'edge':
-                edge = next(iter(context.selection.edges))
-                args.append((edge.source, edge.target, edge.key) if graph.is_multigraph()
-                            else (edge.source, edge.target))
+            if len(kinds) > 1:
+                args.extend(selection_argument(group, kind, graph.is_multigraph())
+                            for group, kind in zip(context.interaction._completed_selections, kinds))
+            elif kinds:
+                args.append(selection_argument(capture_selection(context.selection, kinds[0]),
+                                               kinds[0], graph.is_multigraph()))
             if use_context:
                 args.append(ButtonContext(context))
             result = function(*args)
@@ -853,7 +853,7 @@ def button(name=None, *, shortcut=None, selection=None, selections=1, context=Fa
 
         function.__graph_button__ = Action(f'button:{function.__module__}.{function.__name__}', title,
                                           shortcut, invoke, available, description=description,
-                                          selections=selections)
+                                          selection_types=kinds)
         return function
 
     return decorate(name) if callable(name) else decorate

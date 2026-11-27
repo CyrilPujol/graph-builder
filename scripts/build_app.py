@@ -208,13 +208,9 @@ def main():
     if not built.exists():
         raise RuntimeError(f'Build completed without expected output: {built}')
     if system == 'Windows':
-        shutil.copy2(ROOT / 'scripts/install_windows_desktop.ps1',
-                     built / 'Install desktop integration.ps1')
         shutil.copy2(ROOT / 'assets/icons/graphml_document.ico',
                      built / 'graphml_document.ico')
     if system == 'Linux':
-        shutil.copy2(ROOT / 'scripts/install_linux_desktop.sh',
-                     built / 'Install desktop integration.sh')
         shutil.copy2(icon, built / 'graph_builder.png')
         shutil.copy2(ROOT / 'assets/icons/graphml_document.png',
                      built / 'graphml_document.png')

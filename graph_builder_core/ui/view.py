@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 from math import hypot, isfinite
+from time import monotonic
 
-from PySide6.QtCore import QEvent, QRectF, Qt
-from PySide6.QtGui import QInputDevice, QPainter, QPainterPath
+from PySide6.QtCore import QEvent, QRectF, Qt, QTimer, QSignalBlocker
+from PySide6.QtGui import QInputDevice, QPainter, QPainterPath, QPainterPathStroker
 from PySide6.QtWidgets import QGraphicsView
 
 from graph_builder_core.ui.items import (
-    DRAG_THRESHOLD, RegionItem, _apply_selection, _is_secondary, _selection_mode,
+    DRAG_THRESHOLD, NodeItem, EdgeItem, RegionItem, RegionBoundaryItem,
+    _apply_selection, _is_secondary, _selection_mode,
 )
 
 
@@ -24,7 +26,7 @@ class GraphView(QGraphicsView):
         # Zoom is anchored explicitly using the event position below. Qt's
         # implicit mouse anchor can use a stale cursor position after dialogs.
         self.setTransformationAnchor(QGraphicsView.NoAnchor)
-        # Menus, docks and the onboarding hint resize the viewport. They must
+        # Menus and docks resize the viewport. They must
         # not move the camera towards whichever control the mouse last visited.
         self.setResizeAnchor(QGraphicsView.AnchorViewCenter)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -40,7 +42,76 @@ class GraphView(QGraphicsView):
         self._empty_selection_mode = 'replace'
         self._empty_had_selection = False
         self._empty_dragged = False
+        self.pending_selection_tool = None
+        self._active_selection_tool = None
+        self._ignore_selection_release = False
+        self._touch_targets = set()
+        self._touch_previous = None
+        self._touch_trail = []
+        self._touch_timer = QTimer(self)
+        self._touch_timer.setInterval(33)
+        self._touch_timer.timeout.connect(self._expire_touch_trail)
         self.setFocusPolicy(Qt.StrongFocus)
+
+    def arm_selection_tool(self, kind):
+        self.cancel_selection_tool()
+        if self.scene().window.region_path is not None:
+            self.scene().window.make_region()
+        self.pending_selection_tool = kind
+        self.setCursor(Qt.CrossCursor)
+        message = ('Drag around vertices to select them' if kind == 'lasso' else
+                   'Drag over vertices, edges, or regions to select them')
+        self.scene().window.report(message, 6)
+        self.scene().window.update_actions()
+        self.setFocus()
+
+    def cancel_selection_tool(self):
+        armed = self.pending_selection_tool is not None or self._active_selection_tool is not None
+        self.pending_selection_tool = None
+        if self._active_selection_tool is not None:
+            self._ignore_selection_release = self._empty_start is not None
+            self._empty_start = self._empty_scene_start = None
+            self.scene().lasso_points = []
+            self.scene().rubber_rect = None
+            self._active_selection_tool = None
+        if armed:
+            self._touch_targets.clear()
+            self.unsetCursor()
+            self.scene().update()
+            self.scene().window.update_actions()
+        if self._touch_trail:
+            self._touch_trail.clear()
+            self.scene().touch_trail_points = ()
+            self._touch_timer.stop()
+            self.scene().update()
+        return armed
+
+    def _expire_touch_trail(self):
+        now = monotonic()
+        self._touch_trail = [(stamp, point) for stamp, point in self._touch_trail if now-stamp <= 1]
+        self.scene().touch_trail_points = tuple(point for _, point in self._touch_trail)
+        self.scene().update()
+        if not self._touch_trail:
+            self._touch_timer.stop()
+
+    def _touch_segment(self, position):
+        path = QPainterPath(self._touch_previous)
+        path.lineTo(position)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(2 / max(abs(self.transform().m11()), 1e-6))
+        for item in self.scene().items(stroker.createStroke(path), Qt.IntersectsItemShape):
+            if isinstance(item, RegionBoundaryItem):
+                item = self.scene().window.region_items.get(item.region_id)
+            if isinstance(item, (NodeItem, EdgeItem, RegionItem)):
+                self._touch_targets.add(item)
+        # Apply the complete accumulated set, so sparse mouse events still
+        # select everything crossed and replace mode keeps earlier hits.
+        with QSignalBlocker(self.scene()):
+            _apply_selection(self.scene(), self._touch_targets, self._empty_selection_mode)
+        self.scene().window.selection_changed()
+        self._touch_previous = position
+        self._touch_trail.append((monotonic(), position))
+        self._expire_touch_trail()
 
     def position_message(self):
         if hasattr(self, 'message_label'):
@@ -52,6 +123,9 @@ class GraphView(QGraphicsView):
         self.position_message()
 
     def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape and self.cancel_selection_tool():
+            event.accept()
+            return
         if event.key() == Qt.Key_Escape and self.scene().window.region_path is not None:
             self.scene().window.make_region()
             event.accept()
@@ -66,6 +140,7 @@ class GraphView(QGraphicsView):
         super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
+        self._ignore_selection_release = False
         scene_position = self.mapToScene(event.position().toPoint())
         if self.scene().window.region_path is not None:
             target = self.scene().region_target_at(scene_position)
@@ -77,6 +152,7 @@ class GraphView(QGraphicsView):
         option_pan = (event.button() == Qt.LeftButton
                       and event.modifiers() & Qt.AltModifier)
         if event.button() == Qt.MiddleButton or option_pan:
+            self.cancel_selection_tool()
             self._pan_position = event.position().toPoint()
             self._pan_button = event.button()
             self._pan_start = self._pan_position
@@ -87,15 +163,24 @@ class GraphView(QGraphicsView):
             event.accept()
             return
         secondary = _is_secondary(event.button(), event.modifiers())
-        if item is None and (event.button() in (Qt.LeftButton, Qt.RightButton)):
+        if ((item is None or self.pending_selection_tool is not None)
+                and event.button() in (Qt.LeftButton, Qt.RightButton)):
+            self._active_selection_tool = self.pending_selection_tool
+            self.pending_selection_tool = None
             self._empty_start = event.position().toPoint()
             self._empty_scene_start = scene_position
-            self._empty_secondary = secondary
+            self._empty_secondary = self._active_selection_tool == 'lasso' or (
+                secondary and self._active_selection_tool != 'touch')
             self._empty_selection_mode = _selection_mode(event.modifiers())
             selection = self.scene().window.selection
             self._empty_had_selection = bool(selection.nodes or selection.edges or selection.regions)
             self._empty_dragged = False
-            if secondary:
+            if self._active_selection_tool == 'touch':
+                self._touch_targets = set()
+                self._touch_previous = scene_position
+                self._touch_trail = [(monotonic(), scene_position)]
+                self._touch_timer.start()
+            elif self._empty_secondary:
                 self.scene().lasso_points = [scene_position]
             else:
                 self.scene().rubber_rect = QRectF(scene_position, scene_position)
@@ -126,7 +211,10 @@ class GraphView(QGraphicsView):
                     > DRAG_THRESHOLD):
                 self._empty_dragged = True
             position = self.mapToScene(event.position().toPoint())
-            if self._empty_secondary:
+            if self._active_selection_tool == 'touch':
+                if self._empty_dragged:
+                    self._touch_segment(position)
+            elif self._empty_secondary:
                 points = self.scene().lasso_points
                 if not points or hypot(position.x() - points[-1].x(),
                                        position.y() - points[-1].y()) > 3:
@@ -156,6 +244,10 @@ class GraphView(QGraphicsView):
         _apply_selection(self.scene(), targets, self._empty_selection_mode)
 
     def mouseReleaseEvent(self, event):
+        if self._ignore_selection_release:
+            self._ignore_selection_release = False
+            event.accept()
+            return
         if event.button() == self._pan_button and self._pan_position is not None:
             create_inside_region = not self._pan_dragged and self._pan_region_position is not None
             region_position = self._pan_region_position
@@ -169,9 +261,20 @@ class GraphView(QGraphicsView):
             event.accept()
             return
         if self._empty_start is not None:
+            if ((event.position().toPoint() - self._empty_start).manhattanLength()
+                    > DRAG_THRESHOLD):
+                self._empty_dragged = True
             if self._empty_dragged:
-                self._finish_area_selection()
-            elif self._empty_selection_mode == 'replace':
+                position = self.mapToScene(event.position().toPoint())
+                if self._active_selection_tool == 'touch':
+                    self._touch_segment(position)
+                else:
+                    if self._empty_secondary:
+                        self.scene().lasso_points.append(position)
+                    else:
+                        self.scene().rubber_rect = QRectF(self._empty_scene_start, position).normalized()
+                    self._finish_area_selection()
+            elif self._empty_selection_mode == 'replace' and self._active_selection_tool is None:
                 if self._empty_had_selection:
                     self.scene().clearSelection()
                 elif not self._empty_secondary:
@@ -185,6 +288,10 @@ class GraphView(QGraphicsView):
             self._empty_selection_mode = 'replace'
             self._empty_had_selection = False
             self._empty_dragged = False
+            self._active_selection_tool = None
+            self._touch_targets.clear()
+            self.unsetCursor()
+            self.scene().window.update_actions()
             event.accept()
             return
         super().mouseReleaseEvent(event)

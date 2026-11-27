@@ -10,17 +10,18 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsItem, QGraphicsPathItem
 
 from graph_builder_core.geometry.curves import (
-    _edge_curve_points, _set_edge_curve_points, edge_samples,
+    _edge_curve_points, _set_edge_curve_points, edge_samples, visible_edge_cubics,
 )
 from graph_builder_core.geometry.layout import PIN_ATTRIBUTE
 from graph_builder_core.model.document import edge_label, labels_visible, vertex_label
 from graph_builder_core.model.edges import edge_data
+from graph_builder_core.model.selection import EdgeRef
 from graph_builder_core.model.regions import (
     line_controls, region_by_id, region_polygons, region_segment_points, segment_points,
     set_line_controls, update_region,
 )
 from graph_builder_core.model.styles import (
-    base_style, contrast_text_color, effective_style, vertex_boundary_distance,
+    base_style, effective_style, vertex_label_visible, vertex_text_color,
 )
 
 
@@ -149,7 +150,7 @@ class NodeItem(QGraphicsItem):
         style = effective_style(self.window.graph, 'vertex', self.window.graph.nodes[self.node])
         radius = NODE_RADIUS if style['shape'] == 'none' else max(NODE_RADIUS, float(style['size']) / 2)
         width = 2 * radius + 20
-        if labels_visible(self.window.graph):
+        if vertex_label_visible(self.window.graph, self.window.graph.nodes[self.node]):
             label = vertex_label(self.window.graph, self.node)
             width = max(width, QFontMetricsF(_label_font(13)).horizontalAdvance(label) + 10)
         return QRectF(-width / 2, -radius - 10, width, 2 * radius + 20)
@@ -161,7 +162,7 @@ class NodeItem(QGraphicsItem):
         radius = (NODE_RADIUS + 3 if style['shape'] == 'none' else
                   max(NODE_RADIUS + 3, float(style['size']) / 2 + 3))
         shape.addEllipse(QPointF(0, 0), radius, radius)
-        if style['shape'] == 'none' and labels_visible(self.window.graph):
+        if style['shape'] == 'none' and vertex_label_visible(self.window.graph, self.window.graph.nodes[self.node]):
             metrics = QFontMetricsF(_label_font(13))
             width = metrics.horizontalAdvance(vertex_label(self.window.graph, self.node))
             shape.addRect(QRectF(-width/2 - 4, -metrics.height()/2 - 4,
@@ -176,14 +177,14 @@ class NodeItem(QGraphicsItem):
         kind = style['shape']
         if kind == 'none':
             radius = NODE_RADIUS
-        fill = draw_vertex_body(painter, style)
+        draw_vertex_body(painter, style)
         if self.isSelected() or kind == 'none':
             painter.setBrush(Qt.NoBrush)
             painter.setPen(QPen(SELECTION_COLOR if self.isSelected() else QColor('#aeb7bb'),
                                 2 if self.isSelected() else 1, Qt.DashLine))
             painter.drawEllipse(QPointF(0, 0), max(radius + 4, NODE_RADIUS),
                                 max(radius + 4, NODE_RADIUS))
-        if (any(self.node in group for group in self.window._staged_sets) or
+        if (any(self.node in group.nodes for group in self.window._staged_sets) or
                 self.node in self.window._full_join_first or
                 self.node in self.window._product_first or
                 self.node in self.window._morphism_first or
@@ -207,16 +208,14 @@ class NodeItem(QGraphicsItem):
             painter.setBrush(QColor('#f5f6f7'))
             painter.drawEllipse(QPointF(12, -13), 5, 5)
             painter.drawLine(QPointF(12, -8), QPointF(12, -3))
-        if labels_visible(self.window.graph):
+        if vertex_label_visible(self.window.graph, self.window.graph.nodes[self.node]):
             label = vertex_label(self.window.graph, self.node)
             font = _label_font(13)
             path = QPainterPath()
             metrics = QFontMetricsF(font)
             bounds = metrics.boundingRect(label)
             path.addText(-bounds.width()/2, (metrics.ascent()-metrics.descent())/2, font, label)
-            text_color = style['text']
-            if text_color == 'auto':
-                text_color = contrast_text_color(fill)
+            text_color = vertex_text_color(style)
             outline = '#ffffff' if QColor(text_color).lightness() < 128 else '#111111'
             painter.setBrush(Qt.NoBrush)
             painter.setPen(QPen(QColor(outline), 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
@@ -240,6 +239,7 @@ class EdgeItem(QGraphicsPathItem):
         self.source = source
         self.target = target
         self.key = key
+        self._visible_path = QPainterPath()
         self.setFlag(QGraphicsItem.ItemIsSelectable)
         self.setZValue(1)
         self.refresh()
@@ -251,6 +251,14 @@ class EdgeItem(QGraphicsPathItem):
         path = QPainterPath(_point(samples[0]))
         for sample in samples[1:]:
             path.lineTo(_point(sample))
+        visible = QPainterPath()
+        for index, (start, c1, c2, end) in enumerate(visible_edge_cubics(
+                self.window.graph, self.source, self.target, self.key)):
+            if index == 0:
+                visible.moveTo(_point(start))
+            visible.cubicTo(_point(c1), _point(c2), _point(end))
+        self.prepareGeometryChange()
+        self._visible_path = visible
         self.setPath(path)
         style = _display_edge_style(self.window, edge_data(self.window.graph, self.source, self.target, self.key))
         self.setPen(QPen(QColor(style['stroke']), float(style['width'])))
@@ -284,15 +292,7 @@ class EdgeItem(QGraphicsPathItem):
         return closest, path_position
 
     def arrow_tip(self):
-        path = self.path()
-        end, before = path.pointAtPercent(1), path.pointAtPercent(.97)
-        dx, dy = end.x() - before.x(), end.y() - before.y()
-        length = hypot(dx, dy)
-        if not length:
-            return end
-        style = effective_style(self.window.graph, 'vertex', self.window.graph.nodes[self.target])
-        distance = vertex_boundary_distance(style, -dx / length, -dy / length)
-        return end - QPointF(dx / length * distance, dy / length * distance)
+        return self._visible_path.pointAtPercent(1)
 
     def closest_path_point(self, position):
         """Project a click in the edge's hit area onto its visible path."""
@@ -319,7 +319,8 @@ class EdgeItem(QGraphicsPathItem):
     def boundingRect(self):
         style = self._appearance()
         padding = max(13, float(style['width']) + 5)
-        rect = super().boundingRect().adjusted(-padding, -padding, padding, padding)
+        rect = super().boundingRect().united(self._visible_path.boundingRect()).adjusted(
+            -padding, -padding, padding, padding)
         if self.window and self.source in self.window.graph and self.window.graph.has_edge(self.source, self.target):
             if labels_visible(self.window.graph) and edge_label(self.window.graph, self.source, self.target, self.key):
                 rect = rect.united(self._label_rect())
@@ -330,7 +331,7 @@ class EdgeItem(QGraphicsPathItem):
         stroke = QPainterPathStroker()
         style = self._appearance()
         stroke.setWidth(max(12, float(style['width']) + 6))
-        shape = stroke.createStroke(self.path())
+        shape = stroke.createStroke(self._visible_path)
         if labels_visible(self.window.graph) and edge_label(self.window.graph, self.source, self.target, self.key):
             shape.addRect(self._label_rect())
         return shape
@@ -341,27 +342,29 @@ class EdgeItem(QGraphicsPathItem):
         color = QColor(style['stroke'])
         width = float(style['width'])
         painter.setBrush(Qt.NoBrush)
+        identity = EdgeRef(self.source, self.target, self.window.is_directed, self.key)
+        if any(identity in group.edges for group in self.window._staged_sets):
+            painter.setPen(QPen(QColor('#b87514'), width + 6, Qt.DashLine,
+                                Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(self._visible_path)
         if self.isSelected():
             painter.setPen(QPen(SELECTION_COLOR, width + 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            painter.drawPath(self.path())
+            painter.drawPath(self._visible_path)
         painter.setOpacity(float(style['opacity']))
         painter.setPen(edge_pen(style))
-        painter.drawPath(self.path())
+        painter.drawPath(self._visible_path)
         if float(style['opacity']) == 0:
             painter.setOpacity(1)
             painter.setPen(QPen(QColor('#c5cbd0'), max(1, width), Qt.DotLine))
-            painter.drawPath(self.path())
+            painter.drawPath(self._visible_path)
             painter.setOpacity(0)
-        if self.window.is_directed and self.path().length() > 1:
-            end = self.path().pointAtPercent(1)
-            before = self.path().pointAtPercent(.97)
-            dx, dy = end.x() - before.x(), end.y() - before.y()
+        if self.window.is_directed and self._visible_path.length() > 1:
+            tip = self.arrow_tip()
+            control = self._visible_path.elementAt(self._visible_path.elementCount()-2)
+            dx, dy = tip.x() - control.x, tip.y() - control.y
             length = hypot(dx, dy)
             if length:
                 ux, uy = dx/length, dy/length
-                target_style = effective_style(self.window.graph, 'vertex', self.window.graph.nodes[self.target])
-                distance = vertex_boundary_distance(target_style, -ux, -uy)
-                tip = end - QPointF(ux*distance, uy*distance)
                 shape = style.get('arrow_shape', 'triangle')
                 arrow = edge_arrow_path(tip, ux, uy, style)
                 if self.isSelected():

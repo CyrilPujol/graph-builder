@@ -21,13 +21,12 @@ from graph_builder_core.extensions import (
 )
 from graph_builder_core.io.graphml import convert_from_file, write_graph_file
 from graph_builder_core.model.document import empty_graph, unused_label
-from graph_builder_core.model.operations import twin
 
 __all__ = [
     'Action', 'ContextAction', 'EdgeAction', 'GraphAction', 'VertexAction',
     'VertexGroupAction', 'ExtensionMenu', 'button', 'parameter', 'convert_from_file',
     'discover_buttons', 'discover_parameters', 'discover_extensions',
-    'edit_graph', 'empty_graph', 'main', 'optimize_graph', 'twin', 'unused_label',
+    'edit_graph', 'empty_graph', 'main', 'optimize_graph', 'unused_label',
     'write_graph_file', 'optimize_one', 'GraphParameter', 'ButtonContext',
 ]
 
